@@ -2,7 +2,7 @@
 
 | ID | Status | Decision | ADR | Milestone |
 |---|---|---|---|---|
-| DEC-001 | Accepted | Rust 2024 implementation | ADR-001 | M1 |
+| DEC-001 | Accepted | Rust 2024 implementation | ADR-001 | M0 |
 | DEC-002 | Accepted | Tokio for async network/process orchestration | ADR-002 | M2 |
 | DEC-003 | Accepted | Pkg-owned isolated store | ADR-003 | M1 |
 | DEC-004 | Accepted | Do not mutate native package DBs implicitly | ADR-004 | M1 |
