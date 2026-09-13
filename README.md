@@ -79,6 +79,7 @@ The MVP does **not** claim universal `.deb` compatibility, RPM/Arch support, dis
 
 | Milestone | Goal | Release gate |
 |---|---|---|
+| **M0 — Project foundation** | Rust workspace, initial `crates/`, root `Cargo.toml`, shared dependencies, CI, lint/test foundation | M0 Foundation |
 | **M1 — Local artifact kernel** | Safe local `.deb` → normalized metadata → isolated store → activation → deterministic removal | M1-A Parser, M1-B Store, M1-C Transaction |
 | **M2 — Remote catalog and trust** | Debian repository sync, immutable snapshots, trust verification, remote search/install | M2 Repository |
 | **M3 — Cross-distro expansion** | RPM + ALPM adapters, normalized constraint IR, capability-based resolution | M3 Resolver |
