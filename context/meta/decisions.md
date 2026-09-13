@@ -19,11 +19,11 @@
 | DEC-015 | Accepted | Stable CLI nouns/verbs, internal API unstable | ADR-015 | M1 |
 | DEC-016 | Accepted | Cross-distro mapping uses capabilities, not names alone | ADR-016 | M2 |
 | DEC-017 | Accepted | Support order deb -> rpm -> ALPM | ADR-017 | M1-M3 |
-| DEC-018 | Accepted | Host integration must be explicit/reversible | ADR-018 | M2 |
+| DEC-018 | Accepted | Host integration must be explicit/reversible | ADR-018 | M4 |
 | DEC-019 | Deferred | Container fallback for non-relocatable packages | — | Post-v1 |
 | DEC-020 | Deferred | Native host dependency provider | — | M3+ |
-| DEC-021 | Open | Pkg-native repository signing format | — | M3 |
-| DEC-022 | Open | Content-addressed store versus artifact-derived store IDs | — | v1 |
+| DEC-021 | Open | Pkg-native repository signing format | — | M5 |
+| DEC-022 | Open | Content-addressed store versus artifact-derived store IDs | — | M5 |
 
 ## Rule
 
