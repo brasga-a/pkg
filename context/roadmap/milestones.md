@@ -6,6 +6,149 @@ The governing hierarchy remains: accepted ADRs → invariants → requirements �
 
 ---
 
+## M0 — Project foundation
+
+### Objective
+
+Create the minimum Rust workspace foundation required for implementation to begin: repository layout, initial crates, root `Cargo.toml`, shared dependency declarations, toolchain/lint configuration, test scaffolding, and a compilable CLI entry point.
+
+M0 establishes **build structure, not package-manager behavior**. It must not prematurely implement M1 domain semantics or materialize every future workspace crate before its boundary is proven.
+
+### Initial repository layout
+
+The intended starting layout is:
+
+```text
+pkg/
+├── Cargo.toml
+├── Cargo.lock
+├── rust-toolchain.toml
+├── crates/
+│   ├── pkg-cli/
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       └── main.rs
+│   └── pkg-core/
+│       ├── Cargo.toml
+│       └── src/
+│           └── lib.rs
+├── tests/
+├── context/
+└── .github/
+    └── workflows/
+        └── ci.yml
+```
+
+The broader future split documented in `project/architecture.md` (`pkg-formats`, `pkg-repo`, `pkg-resolver`, `pkg-store`, `pkg-state`, `pkg-host`, `pkg-testkit`) remains **deferred until implementation pressure proves those boundaries**. M0 creates only the minimum useful crates instead of empty speculative abstractions.
+
+### Governing decisions
+
+- **DEC-001** — Rust 2024 implementation.
+
+Other decisions already constrain future work, but M0 does not implement their package-management semantics.
+
+### Required invariants
+
+M0 introduces no new runtime invariant. Its scaffold must nevertheless avoid creating mechanisms that bypass the existing architecture. In particular:
+
+- **INV-001** — no foundation helper may silently mutate native package-manager databases.
+- **INV-002** — no bootstrap code writes package payloads directly into `/`.
+- **INV-003** — no generic shell/hook mechanism is introduced for package lifecycle scripts.
+- **INV-010** — future install planning remains able to stay side-effect free; foundational APIs must not couple planning to mutation.
+- **INV-019** — no bootstrap path introduces system-critical package management as an implicit default.
+
+### Governing ADR
+
+- [ADR-001 — Rust 2024 implementation](../adr/ADR-001-rust-2024-implementation.md)
+
+The workspace structure itself is intentionally minimal and reversible; it does not establish the full post-MVP crate split as an accepted architectural boundary.
+
+### Root `Cargo.toml`
+
+M0 should create a workspace-oriented root manifest with:
+
+- Cargo resolver appropriate for Rust 2024;
+- workspace members under `crates/`;
+- shared package metadata where useful;
+- centralized `[workspace.dependencies]` for dependencies actually needed by M0/M1;
+- centralized workspace lints so crates inherit the same baseline policy.
+
+Exact dependency versions must be selected and locked during implementation rather than copied from stale documentation.
+
+### Baseline dependencies
+
+The initial workspace may centralize the dependencies required to bootstrap the CLI and support the first M1 implementation slice:
+
+**CLI / application edge**
+
+- `clap` — command-line parsing;
+- `anyhow` — top-level CLI/application error context only.
+
+**Domain / serialization / configuration**
+
+- `serde` — structured internal data;
+- `serde_json` — debug/fixture serialization where useful;
+- `toml` — configuration parsing;
+- `thiserror` — typed library/domain errors.
+
+**Diagnostics**
+
+- `tracing`;
+- `tracing-subscriber`.
+
+**M1 local package/state primitives**
+
+- `ar` — Debian archive container parsing;
+- `tar` — control/data tar payloads;
+- `flate2`, `xz2`, `zstd` — Debian payload compression variants as required by fixtures;
+- `goblin` — static ELF inspection;
+- `sha2` and/or `blake3` according to the accepted artifact-identity implementation;
+- `rusqlite` — local SQLite state.
+
+**Testing**
+
+- `tempfile`;
+- `assert_cmd`;
+- `predicates`;
+- `proptest`.
+
+Dependencies belonging to later milestones should **not** be pulled into runtime crates during M0 merely because they are planned:
+
+- `tokio` / `reqwest` → introduced when M2 networking work begins;
+- `rpm` → introduced with M3 RPM support;
+- `pubgrub` or another solver implementation → introduced only after the normalized solver IR is ready in M3;
+- future signing crates → introduced only after the relevant trust/signing decision exists.
+
+### Small tasks
+
+- [ ] Create the root Rust 2024 workspace `Cargo.toml`.
+- [ ] Configure the workspace resolver, shared package metadata, profiles, and lint policy.
+- [ ] Create and commit `Cargo.lock` because pkg is an application/workspace, not only a reusable library.
+- [ ] Add `rust-toolchain.toml` with the required Rust channel/components for `rustfmt` and `clippy`.
+- [ ] Create `crates/`.
+- [ ] Create `crates/pkg-cli` as the initial binary crate.
+- [ ] Create `crates/pkg-core` as the smallest library boundary for shared domain/application types.
+- [ ] Keep format/repository/resolver/store/state/host code as internal modules until their crate boundaries are proven; do not create empty placeholder crates.
+- [ ] Add the minimal `pkg` CLI entry point with `--help` and `--version`.
+- [ ] Centralize baseline dependency declarations under `[workspace.dependencies]` where useful.
+- [ ] Add `thiserror` to library/domain error handling and reserve `anyhow` for the CLI/application edge.
+- [ ] Configure `tracing`/`tracing-subscriber` with a minimal local diagnostic subscriber.
+- [ ] Create test directories and a first smoke test that executes `pkg --help`.
+- [ ] Add formatting and lint configuration shared across the workspace.
+- [ ] Add a minimal CI workflow running format, check, test, and clippy on Linux.
+- [ ] Ensure the workspace builds from a clean checkout without generated local files.
+- [ ] Document each non-test dependency's current milestone use before adding it to a concrete crate.
+
+### Release gate
+
+- [Gate M0 — Foundation](release-gates.md#gate-m0--foundation)
+
+### Exit criteria
+
+M0 is complete when a clean checkout can run `cargo check --workspace`, `cargo test --workspace`, `cargo fmt --check`, and `cargo clippy --workspace --all-targets -- -D warnings`; the `pkg` binary exposes a minimal help/version surface; CI runs the same baseline checks; and no speculative package-manager feature or future crate boundary has been implemented merely as scaffolding.
+
+---
+
 ## M1 — Local artifact kernel
 
 ### Objective
@@ -58,7 +201,6 @@ Prove the smallest safe end-to-end installation path for a supported local `.deb
 
 ### Small tasks
 
-- [ ] Create the initial Rust 2024 crate/module layout and CLI entry point.
 - [ ] Define package/domain IDs, versions, architectures, artifact identity, install plan, transaction ID, and installed-package records.
 - [ ] Implement `.deb` probing and metadata parsing without invoking `dpkg`.
 - [ ] Parse `control.tar.*` and inventory maintainer scripts without executing them.
