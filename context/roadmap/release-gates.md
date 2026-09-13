@@ -2,6 +2,27 @@
 
 Release gates define the evidence required to declare a milestone complete. A feature being implemented is not enough: its milestone remains incomplete until every applicable gate below passes.
 
+## Gate M0 — Foundation
+
+Required evidence:
+
+- the root Rust 2024 workspace manifest is valid;
+- `crates/pkg-cli` and `crates/pkg-core` compile from a clean checkout;
+- the full future crate split is not pre-created as empty speculative architecture;
+- baseline workspace dependencies are centralized and limited to M0/M1 needs;
+- later-milestone dependencies such as `tokio`, `reqwest`, `rpm`, and solver-specific crates are not introduced without current use;
+- `Cargo.lock` is committed;
+- `rust-toolchain.toml` includes the required formatter/linter components;
+- `pkg --help` and `pkg --version` execute successfully;
+- `cargo check --workspace` passes;
+- `cargo test --workspace` passes;
+- `cargo fmt --check` passes;
+- `cargo clippy --workspace --all-targets -- -D warnings` passes;
+- CI executes the same baseline checks on Linux;
+- no M1 package-management behavior, host mutation, package script execution, or native package-manager integration is introduced merely as scaffolding.
+
+Primary authority: **ADR-001; DEC-001; project/architecture.md.**
+
 ## Gate M1-A — Parser
 
 Required evidence:
