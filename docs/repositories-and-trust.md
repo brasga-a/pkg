@@ -41,11 +41,20 @@ De acordo com o princípio **INV-005** e **ADR-008**, nenhum metadado de reposit
 ### Fluxo de Validação do `InRelease`
 1. O `pkg` faz o download do arquivo `InRelease` do repositório (ex: `http://deb.debian.org/debian/dists/bookworm/InRelease`).
 2. O arquivo `InRelease` é uma mensagem assinada em texto claro (*cleartext signed message*) segundo a especificação OpenPGP (RFC 4880).
-3. Se um caminho de chave pública (`public_key_path`) for fornecido na configuração do repositório, o módulo `repository/deb.rs` utiliza a crate Rust pura `pgp` para:
-   - Fazer o parse da chave pública confiável.
-   - Extrair a assinatura digital e o bloco de dados.
-   - Executar a verificação criptográfica via `msg.verify(&key)`.
-4. Se a assinatura digital falhar ou for adulterada, a atualização é rejeitada com erro de segurança e o snapshot anterior é preservado intacto.
+3. **Resolução Inteligente de Chaves:**
+   - Se um caminho explícito (`public_key_path`) estiver configurado no `repositories.toml`, o `pkg` o utiliza prioritariamente.
+   - Caso contrário, o `pkg` busca nos keyrings padrão do sistema hospedeiro (`/usr/share/keyrings/ubuntu-archive-keyring.gpg`, `/etc/apt/trusted.gpg.d/`, etc.).
+   - Se o keyring do Debian não estiver instalado no sistema hospedeiro, o `pkg` realiza o download seguro da chave oficial pública para `~/.local/share/pkg/keyrings/debian-<distro>.asc`.
+4. **Decodificação Multi-Key e Suporte a Subchaves:**
+   - Filtra pacotes privados de confiança do GnuPG (`Tag::Trust`) presentes em arquivos binários `.gpg`.
+   - Itera por todas as chaves públicas presentes no chaveiro.
+   - Suporta verificação contra a chave primária ou qualquer uma de suas subchaves públicas (`public_subkeys`).
+5. Se a assinatura digital for válida:
+   ```text
+   ✓ Verified GPG signature for http://archive.ubuntu.com/ubuntu (noble) using /usr/share/keyrings/ubuntu-archive-keyring.gpg
+   ✓ Verified GPG signature for http://deb.debian.org/debian (bookworm) using ~/.local/share/pkg/keyrings/debian-bookworm.asc
+   ```
+6. Se a assinatura digital falhar ou for adulterada, a atualização é rejeitada com erro de segurança e o snapshot anterior é preservado intacto.
 
 ---
 
