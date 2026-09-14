@@ -135,11 +135,11 @@ cp -a -- "$EMPTY_BASELINE" "$INSTALLED_BASELINE"
 
 # Sanity checks: the installed baseline must expose the package through both list
 # and info-by-name before it is used for benchmark preparation.
-"$PKG_BIN" --data-dir "$INSTALLED_BASELINE" --profile "$PROFILE" list \
-  | grep -Fq "$PKG_NAME" || {
-    echo "Falha ao preparar baseline: '$PKG_NAME' não aparece em pkg list" >&2
-    exit 1
-  }
+LIST_OUTPUT="$("$PKG_BIN" --data-dir "$INSTALLED_BASELINE" --profile "$PROFILE" list)"
+if ! grep -Fq "$PKG_NAME" <<<"$LIST_OUTPUT"; then
+  echo "Falha ao preparar baseline: '$PKG_NAME' não aparece em pkg list" >&2
+  exit 1
+fi
 "$PKG_BIN" --data-dir "$INSTALLED_BASELINE" --profile "$PROFILE" info "$PKG_NAME" >/dev/null
 
 SAFE_NAME="$(printf '%s' "$PKG_NAME" | tr -cs 'A-Za-z0-9._-' '_')"
