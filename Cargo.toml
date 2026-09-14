@@ -1,0 +1,94 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/pkg-cli",
+    "crates/pkg-core",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["pkg contributors"]
+repository = "https://github.com/pkg-linux/pkg"
+readme = "README.md"
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[workspace.dependencies]
+# Internal workspace crates
+pkg-core = { path = "crates/pkg-core" }
+
+# --- CLI / application edge ---
+# clap (M0/M1): Command-line argument parsing and help/version generation
+clap = { version = "4.5", features = ["derive", "cargo"] }
+# anyhow (M0/M1): Top-level CLI/application error context and reporting
+anyhow = "1.0"
+
+# --- Domain / serialization / configuration ---
+# serde (M0/M1): Structured internal data serialization and deserialization
+serde = { version = "1.0", features = ["derive"] }
+# serde_json (M0/M1): Debug and fixture serialization
+serde_json = "1.0"
+# toml (M0/M1): Configuration file parsing
+toml = "0.8"
+# thiserror (M0/M1): Typed library and domain error definitions
+thiserror = "2.0"
+
+# --- Diagnostics ---
+# tracing (M0/M1): Structured diagnostic instrumentation
+tracing = "0.1"
+# tracing-subscriber (M0/M1): Local diagnostic logging subscriber configuration
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# --- M1 local package/state primitives (centralized declarations; not pulled into runtime crates in M0) ---
+# ar (M1): Debian archive (.deb) ar container parsing
+ar = "0.9"
+# tar (M1): Reading control.tar and data.tar payloads
+tar = "0.4"
+# flate2 (M1): gzip decompression for tar payloads
+flate2 = "1.0"
+# xz2 (M1): xz decompression for tar payloads
+xz2 = "0.1"
+# zstd (M1): zstd decompression for tar payloads
+zstd = "0.13"
+# goblin (M1): Static ELF inspection and library dependency analysis
+goblin = "0.9"
+# sha2 (M1): Artifact identity verification and digest computation
+sha2 = "0.10"
+# rusqlite (M1): Local SQLite state database management
+rusqlite = { version = "0.32", features = ["bundled"] }
+# libc (M1): POSIX file locking (flock) for process lock
+libc = "0.2"
+
+# --- Testing ---
+# tempfile (M0/M1): Isolated temporary directories for tests
+tempfile = "3.17"
+# assert_cmd (M0/M1): CLI execution assertion in integration tests
+assert_cmd = "2.0"
+# predicates (M0/M1): Boolean predicates for assertion matching
+predicates = "3.1"
+# proptest (M0/M1): Property-based testing
+proptest = "1.6"

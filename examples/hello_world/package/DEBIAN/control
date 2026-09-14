@@ -1,0 +1,7 @@
+Package: hello-world
+Version: 1.0.0
+Architecture: amd64
+Maintainer: pkg Developer <dev@example.com>
+Description: Hello World example package for pkg
+ A simple hello world demonstration package for testing pkg
+ package installation, profile activation, and removal.
