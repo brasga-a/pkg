@@ -65,11 +65,34 @@ enum Commands {
         query: String,
     },
 
+    /// Manage remote repositories
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommands,
+    },
+
     /// Show detailed metadata and state for a package or artifact
     Info {
         /// Package name or path to a local package artifact
         target: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum RepoCommands {
+    /// Add a new remote repository
+    Add {
+        /// Unique identifier for the repository (e.g., ubuntu-noble)
+        id: String,
+        /// Repository base URL (e.g., http://archive.ubuntu.com/ubuntu)
+        url: String,
+        /// Distribution suite (e.g., noble)
+        distribution: String,
+        /// Components to fetch (e.g., main universe)
+        components: Vec<String>,
+    },
+    /// List configured repositories
+    List,
 }
 
 fn init_tracing(verbose: bool) {
@@ -216,13 +239,19 @@ async fn run() -> Result<()> {
         Commands::Update => {
             let config_path = engine.layout().base_dir().join("repositories.toml");
             if !config_path.exists() {
-                println!("No repositories.toml found at {}. Generating a default one...", config_path.display());
+                println!("No repositories.toml found at {}. Generating defaults...", config_path.display());
                 std::fs::write(&config_path, r#"
 [[repository]]
-id = "debian-bookworm-main"
+id = "ubuntu-noble"
+url = "http://archive.ubuntu.com/ubuntu"
+distribution = "noble"
+components = ["main", "universe", "restricted", "multiverse"]
+
+[[repository]]
+id = "debian-bookworm"
 url = "http://deb.debian.org/debian"
 distribution = "bookworm"
-components = ["main"]
+components = ["main", "contrib", "non-free"]
 "#)?;
             }
             println!("Reading config from {}...", config_path.display());
@@ -230,6 +259,46 @@ components = ["main"]
             println!("Updating {} repositories...", config.repositories.len());
             let total = engine.update(&config).await?;
             println!("Successfully updated snapshots. {} remote packages available.", total);
+        }
+        Commands::Repo { command } => {
+            let config_path = engine.layout().base_dir().join("repositories.toml");
+            match command {
+                RepoCommands::List => {
+                    if !config_path.exists() {
+                        println!("No repositories configured.");
+                        return Ok(());
+                    }
+                    let config = pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?;
+                    println!("{:<25} {:<35} {:<15} COMPONENTS", "ID", "URL", "DISTRIBUTION");
+                    for repo in config.repositories {
+                        println!("{:<25} {:<35} {:<15} {}", repo.id, repo.url, repo.distribution, repo.components.join(", "));
+                    }
+                }
+                RepoCommands::Add { id, url, distribution, components } => {
+                    let mut config = if config_path.exists() {
+                        pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?
+                    } else {
+                        pkg_core::repository::RepositoriesConfig { repositories: vec![] }
+                    };
+                    
+                    if config.repositories.iter().any(|r| r.id == id) {
+                        return Err(anyhow::anyhow!("Repository with ID '{}' already exists", id));
+                    }
+                    
+                    config.repositories.push(pkg_core::repository::RepositoryConfig {
+                        id: id.clone(),
+                        url: url.clone(),
+                        distribution,
+                        components,
+                        public_key_path: None,
+                    });
+                    
+                    let toml_string = toml::to_string_pretty(&config)?;
+                    std::fs::write(&config_path, toml_string)?;
+                    println!("Successfully added repository '{}' ({})", id, url);
+                    println!("Run `pkg update` to sync the new repository.");
+                }
+            }
         }
         Commands::Search { query } => {
             if let Some(pkg) = engine.search(&query)? {
