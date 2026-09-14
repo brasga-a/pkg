@@ -31,6 +31,8 @@ tempfile = { workspace = true }
 ar = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
 
 [[test]]
 name = "cli_smoke"
@@ -52,3 +54,6 @@ path = "../../tests/gate_m1_c_transaction.rs"
 name = "gate_m2_repository"
 path = "../../tests/gate_m2_repository.rs"
 
+[[test]]
+name = "review_regressions"
+path = "../../tests/review_regressions.rs"

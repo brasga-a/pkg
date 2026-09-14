@@ -64,6 +64,23 @@ impl fmt::Display for PackageName {
 pub struct PackageVersion(String);
 
 impl PackageVersion {
+    /// Rejects versions that cannot safely identify a Debian store object.
+    pub fn validate(&self) -> Result<()> {
+        if self.0.is_empty()
+            || self.0.len() > 128
+            || !self
+                .0
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".+~:-".contains(&b))
+        {
+            return Err(Error::MalformedArchive(format!(
+                "Invalid package version: {:?}",
+                self.0
+            )));
+        }
+        Ok(())
+    }
+
     /// Creates a package version string.
     pub fn new(version: impl Into<String>) -> Self {
         Self(version.into().trim().to_string())

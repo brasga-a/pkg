@@ -55,6 +55,9 @@ De acordo com o princípio **INV-005** e **ADR-008**, nenhum metadado de reposit
    ✓ Verified GPG signature for http://deb.debian.org/debian (bookworm) using ~/.local/share/pkg/keyrings/debian-bookworm.asc
    ```
 6. Se a assinatura digital falhar ou for adulterada, a atualização é rejeitada com erro de segurança e o snapshot anterior é preservado intacto.
+7. Antes de descompactar cada índice, o `pkg` exige sua entrada na seção `SHA256` do conteúdo assinado e verifica seu tamanho e hash. Um índice válido como gzip/xz, mas com conteúdo diferente, também é rejeitado. O mesmo requisito vale para o fallback de xz para gzip.
+
+O `InRelease` tem limite de 4 MiB; índices comprimidos têm limite de 256 MiB e o texto descomprimido de 1 GiB. Até quatro componentes são baixados simultaneamente.
 
 ---
 
@@ -73,11 +76,13 @@ Para proteger a máquina contra ataques de exaustão de disco ou saturação de 
 Quando um pacote remoto precisa ser instalado, o `pkg` nunca executa o download diretamente para a área de instalação:
 
 ```text
-Download HTTP ──► cache/artifacts/sha256/<hash> ──► Verificação SHA-256 ──► Staging & Install
+Download HTTP ──► arquivo temporário ──► tamanho + SHA-256 ──► cache/artifacts/sha256/<hash> ──► Staging & Install
 ```
 
 1. **Localização:** Os pacotes baixados são salvos em `~/.local/share/pkg/cache/artifacts/sha256/<digest>`.
-2. **Deduplicação:** Se a versão solicitada com aquele digest já foi baixada anteriormente, o download é ignorado e o arquivo local é reaproveitado instantaneamente.
+2. **Deduplicação:** Um arquivo existente é reaproveitado somente após revalidar seu tamanho e SHA-256. Links simbólicos não são aceitos como entradas do cache.
 3. **Verificação de Integridade Pós-Download:**
    - O arquivo no cache é lido e seu digest SHA-256 é recalculado.
    - Se o hash calculado for divergente do declarado no catálogo do repositório, o arquivo é imediatamente apagado do cache e a operação é abortada com `Error::SecurityViolation`.
+   - Um digest precisa conter exatamente 64 caracteres hexadecimais antes de ser usado como nome de arquivo.
+   - Downloads incompletos não são publicados. O arquivo temporário é removido ao retornar um erro ou cancelar a operação; após interrupção abrupta do processo, qualquer temporário remanescente não é aceito como entrada definitiva do cache.

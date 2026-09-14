@@ -4,7 +4,7 @@
 //! without invoking `dpkg` (INV-001, ADR-005, Gate M1-A).
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
@@ -22,6 +22,25 @@ use crate::format::{ArtifactAdapter, ExtractionLimits, ExtractionReport};
 pub struct DebAdapter;
 
 impl DebAdapter {
+    fn create_payload_dirs(root: &Path, relative: &Path) -> Result<()> {
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(Error::SecurityViolation(format!(
+                        "Non-directory payload parent: {}",
+                        current.display()
+                    )));
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)?,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a new `DebAdapter`.
     #[must_use]
     pub const fn new() -> Self {
@@ -226,6 +245,11 @@ impl ArtifactAdapter for DebAdapter {
                 .to_string();
 
             if raw_id == "debian-binary" {
+                if debian_binary_found {
+                    return Err(Error::MalformedArchive(
+                        "Duplicate 'debian-binary' entry in ar container".into(),
+                    ));
+                }
                 let mut buf = String::new();
                 entry.read_to_string(&mut buf)?;
                 let trimmed = buf.trim();
@@ -236,10 +260,20 @@ impl ArtifactAdapter for DebAdapter {
                 }
                 debian_binary_found = true;
             } else if raw_id.starts_with("control.tar") {
+                if control_tar_data.is_some() {
+                    return Err(Error::MalformedArchive(
+                        "Duplicate 'control.tar.*' entry in ar container".into(),
+                    ));
+                }
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
                 control_tar_data = Some((raw_id, bytes));
             } else if raw_id.starts_with("data.tar") {
+                if data_tar_data.is_some() {
+                    return Err(Error::MalformedArchive(
+                        "Duplicate 'data.tar.*' entry in ar container".into(),
+                    ));
+                }
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
                 data_tar_data = Some((raw_id, bytes));
@@ -320,6 +354,7 @@ impl ArtifactAdapter for DebAdapter {
             Error::MalformedArchive("Missing 'Version' field in control file".into())
         })?;
         let version = PackageVersion::new(version_raw);
+        version.validate()?;
 
         let arch_raw = fields.get("Architecture").ok_or_else(|| {
             Error::MalformedArchive("Missing 'Architecture' field in control file".into())
@@ -341,6 +376,7 @@ impl ArtifactAdapter for DebAdapter {
         let mut data_tar = Self::make_tar_reader(&data_name, Box::new(Cursor::new(data_bytes)))?;
         let mut entries = Vec::new();
         let mut provides = Vec::new();
+        let mut seen_paths = HashSet::new();
 
         let data_entries = data_tar.entries().map_err(|e| {
             Error::MalformedArchive(format!("Failed to read data.tar entries: {e}"))
@@ -358,6 +394,12 @@ impl ArtifactAdapter for DebAdapter {
             let relative_path = Self::sanitize_relative_path(&raw_path)?;
             if relative_path.as_os_str().is_empty() {
                 continue;
+            }
+            if !seen_paths.insert(relative_path.clone()) {
+                return Err(Error::MalformedArchive(format!(
+                    "Duplicate payload path: {}",
+                    relative_path.display()
+                )));
             }
             let header = entry.header();
             let entry_type = header.entry_type();
@@ -430,10 +472,14 @@ impl ArtifactAdapter for DebAdapter {
                 .to_string();
 
             if raw_id.starts_with("data.tar") {
+                if data_tar_data.is_some() {
+                    return Err(Error::MalformedArchive(
+                        "Duplicate 'data.tar.*' entry in ar container".into(),
+                    ));
+                }
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
                 data_tar_data = Some((raw_id, bytes));
-                break;
             }
         }
 
@@ -447,6 +493,8 @@ impl ArtifactAdapter for DebAdapter {
         let mut total_bytes = 0u64;
         let mut entries_count = 0usize;
         let mut symlinks_count = 0usize;
+        let mut seen = HashSet::new();
+        let mut pending_links = Vec::new();
 
         fs::create_dir_all(destination)?;
 
@@ -475,10 +523,22 @@ impl ArtifactAdapter for DebAdapter {
                 continue;
             }
             let target_path = destination.join(&relative_path);
+            if !seen.insert(relative_path.clone()) {
+                return Err(Error::MalformedArchive(format!(
+                    "Duplicate payload path: {}",
+                    relative_path.display()
+                )));
+            }
 
             let (is_dir, is_symlink, symlink_target_opt, file_size, file_mode) = {
                 let header = entry.header();
                 let entry_type = header.entry_type();
+                if !entry_type.is_dir() && !entry_type.is_symlink() && !entry_type.is_file() {
+                    return Err(Error::MalformedArchive(format!(
+                        "Unsupported payload entry type: {}",
+                        relative_path.display()
+                    )));
+                }
                 let link_name = if entry_type.is_symlink() {
                     let link = header
                         .link_name()
@@ -502,7 +562,7 @@ impl ArtifactAdapter for DebAdapter {
             };
 
             if is_dir {
-                fs::create_dir_all(&target_path)?;
+                Self::create_payload_dirs(destination, &relative_path)?;
             } else if is_symlink {
                 symlinks_count += 1;
                 let link_name = symlink_target_opt
@@ -510,18 +570,9 @@ impl ArtifactAdapter for DebAdapter {
 
                 Self::validate_symlink_target(&relative_path, &link_name, destination)?;
 
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-
-                // If a symlink or file already exists at target, remove it first
-                if target_path.is_symlink() || target_path.exists() {
-                    let _ = fs::remove_file(&target_path);
-                }
-
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&link_name, &target_path)?;
-
+                // Materialize links only after all regular files, so archive order
+                // cannot redirect writes through an earlier symlink.
+                pending_links.push((relative_path.clone(), link_name));
                 extracted_files.push(relative_path);
             } else {
                 if file_size > limits.max_single_file_bytes {
@@ -544,11 +595,14 @@ impl ArtifactAdapter for DebAdapter {
                     )));
                 }
 
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent)?;
+                if let Some(parent) = relative_path.parent() {
+                    Self::create_payload_dirs(destination, parent)?;
                 }
 
-                let mut out_file = File::create(&target_path)?;
+                let mut out_file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target_path)?;
                 io::copy(&mut entry, &mut out_file)?;
 
                 #[cfg(unix)]
@@ -559,6 +613,28 @@ impl ArtifactAdapter for DebAdapter {
                 }
 
                 extracted_files.push(relative_path);
+            }
+        }
+
+        for (relative, target) in &pending_links {
+            if let Some(parent) = relative.parent() {
+                Self::create_payload_dirs(destination, parent)?;
+            }
+            std::os::unix::fs::symlink(target, destination.join(relative))?;
+        }
+        let root = fs::canonicalize(destination)?;
+        for (relative, _) in &pending_links {
+            let resolved = fs::canonicalize(destination.join(relative)).map_err(|e| {
+                Error::SecurityViolation(format!(
+                    "Unresolvable payload link {}: {e}",
+                    relative.display()
+                ))
+            })?;
+            if !resolved.starts_with(&root) {
+                return Err(Error::SecurityViolation(format!(
+                    "Escaping payload link: {}",
+                    relative.display()
+                )));
             }
         }
 

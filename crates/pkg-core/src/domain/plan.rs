@@ -16,6 +16,8 @@ pub struct BinaryActivation {
     pub relative_store_path: PathBuf,
     /// Target destination in the profile bin directory.
     pub profile_symlink_path: PathBuf,
+    /// Previously recorded target that this activation is allowed to replace.
+    pub previous_target: Option<PathBuf>,
 }
 
 /// A side-effect-free plan for installing a package into the pkg-owned store.
@@ -50,6 +52,8 @@ pub struct RemovePlan {
     pub store_path: PathBuf,
     /// Binary symlinks to unlink in the profile.
     pub binaries_to_remove: Vec<PathBuf>,
+    /// Recorded targets corresponding to binaries_to_remove.
+    pub expected_targets: Vec<PathBuf>,
     /// Whether this is a dry-run execution.
     pub is_dry_run: bool,
 }

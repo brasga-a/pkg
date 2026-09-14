@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::activation::Activator;
 use crate::domain::plan::{BinaryActivation, InstallPlan, RemovePlan};
 use crate::error::{Error, Result};
 use crate::format::ArtifactAdapter;
@@ -26,6 +27,7 @@ impl Planner {
         profile: &str,
         is_dry_run: bool,
     ) -> Result<InstallPlan> {
+        StoreLayout::validate_profile(profile)?;
         let adapter = DebAdapter::new();
         let package = adapter.parse_metadata(artifact_path)?;
 
@@ -41,6 +43,7 @@ impl Planner {
         let store_id =
             StoreLayout::compute_store_id(&package.digest, &package.name, &package.version);
         let target_store_dir = layout.store_object_dir(&store_id);
+        layout.validate_store_path(&target_store_dir)?;
 
         let mut binaries = Vec::new();
         let profile_bin = layout.profile_bin_dir(profile);
@@ -63,10 +66,22 @@ impl Planner {
                             });
                         }
 
+                        if binaries.iter().any(|b: &BinaryActivation| b.command == cmd) {
+                            return Err(Error::MalformedArchive(format!(
+                                "Duplicate executable command: {cmd}"
+                            )));
+                        }
+                        let previous_target =
+                            db.activation_target(profile, cmd, package.name.as_str())?;
+                        Activator::check_destination(
+                            &profile_bin.join(cmd),
+                            previous_target.as_deref(),
+                        )?;
                         binaries.push(BinaryActivation {
                             command: cmd.to_string(),
                             relative_store_path: entry.relative_path.clone(),
                             profile_symlink_path: profile_bin.join(cmd),
+                            previous_target,
                         });
                     }
                 }
@@ -94,11 +109,23 @@ impl Planner {
         profile: &str,
         is_dry_run: bool,
     ) -> Result<RemovePlan> {
+        StoreLayout::validate_profile(profile)?;
         let pkg = db
             .get_package(profile, package_name)?
             .ok_or_else(|| Error::PackageNotFound(package_name.to_string()))?;
 
         let profile_bin = layout.profile_bin_dir(profile);
+        layout.validate_store_path(&pkg.store_path)?;
+        let expected_targets = pkg
+            .binaries
+            .iter()
+            .map(|bin| {
+                db.activation_target(profile, bin, package_name)?
+                    .ok_or_else(|| {
+                        Error::Internal(format!("Missing activation ownership for {bin}"))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let binaries_to_remove = pkg
             .binaries
             .iter()
@@ -111,6 +138,7 @@ impl Planner {
             store_id: pkg.store_id,
             store_path: pkg.store_path,
             binaries_to_remove,
+            expected_targets,
             is_dry_run,
         })
     }

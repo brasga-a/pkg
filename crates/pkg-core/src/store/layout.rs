@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::domain::package::{ArtifactDigest, PackageName, PackageVersion};
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Filesystem layout for pkg-owned isolated stores, profiles, and state.
 #[derive(Debug, Clone)]
@@ -16,8 +16,15 @@ impl StoreLayout {
     /// Creates a store layout rooted at the specified base directory.
     #[must_use]
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+        let base_dir = base_dir.into();
         Self {
-            base_dir: base_dir.into(),
+            base_dir: if base_dir.is_absolute() {
+                base_dir
+            } else {
+                std::env::current_dir()
+                    .expect("current working directory unavailable")
+                    .join(base_dir)
+            },
         }
     }
 
@@ -69,6 +76,21 @@ impl StoreLayout {
         self.staging_root().join(transaction_id)
     }
 
+    /// Validates identifiers used as one filesystem path component.
+    pub fn validate_component(value: &str, label: &str) -> Result<()> {
+        if value.is_empty()
+            || matches!(value, "." | "..")
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        {
+            return Err(Error::SecurityViolation(format!(
+                "Invalid {label}: {value:?}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Store object path for a specific store ID.
     #[must_use]
     pub fn store_object_dir(&self, store_id: &str) -> PathBuf {
@@ -93,7 +115,10 @@ impl StoreLayout {
     /// Returns the specific path for a cached artifact addressed by its digest.
     pub fn artifact_cache_path(&self, digest: &str) -> PathBuf {
         // e.g., cache/artifacts/sha256/abc123def...
-        self.cache_dir().join("artifacts").join("sha256").join(digest)
+        self.cache_dir()
+            .join("artifacts")
+            .join("sha256")
+            .join(digest)
     }
 
     /// Directory containing profiles.
@@ -158,15 +183,97 @@ impl StoreLayout {
 
     /// Atomically promotes a prepared staging directory to its final immutable store location.
     pub fn promote_staging(&self, staging_path: &Path, final_store_path: &Path) -> Result<()> {
-        if let Some(parent) = final_store_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        // If final store already exists (e.g. reinstall), remove it first or replace
+        self.validate_store_path(final_store_path)?;
+        // Immutable objects may already be shared with another profile.
         if final_store_path.exists() {
-            fs::remove_dir_all(final_store_path)?;
+            if !same_store_tree(staging_path, final_store_path)? {
+                return Err(Error::SecurityViolation(format!(
+                    "Existing store object differs from verified staging: {}",
+                    final_store_path.display()
+                )));
+            }
+            fs::remove_dir_all(staging_path)?;
+            return Ok(());
         }
         fs::rename(staging_path, final_store_path)?;
         Ok(())
+    }
+
+    /// Only direct, non-symlink children of the store may be promoted or removed.
+    pub fn validate_store_path(&self, path: &Path) -> Result<()> {
+        let relative = path.strip_prefix(self.store_dir()).map_err(|_| {
+            Error::SecurityViolation(format!("Path outside store: {}", path.display()))
+        })?;
+        let mut components = relative.components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+            || fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir() || m.file_type().is_symlink())
+        {
+            return Err(Error::SecurityViolation(format!(
+                "Invalid store path: {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Profile names are single path components, never filesystem paths.
+    pub fn validate_profile(profile: &str) -> Result<()> {
+        Self::validate_component(profile, "profile")
+    }
+}
+
+// Reusing a shared object must not bypass verification of the newly prepared payload.
+fn same_store_tree(prepared: &Path, existing: &Path) -> Result<bool> {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    let left = fs::symlink_metadata(prepared)?;
+    let right = fs::symlink_metadata(existing)?;
+    if left.file_type() != right.file_type() {
+        return Ok(false);
+    }
+    if left.file_type().is_symlink() {
+        return Ok(fs::read_link(prepared)? == fs::read_link(existing)?);
+    }
+    if left.is_dir() {
+        let names = |path: &Path| -> Result<Vec<std::ffi::OsString>> {
+            let mut names = fs::read_dir(path)?
+                .map(|entry| entry.map(|e| e.file_name()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            names.sort();
+            Ok(names)
+        };
+        let children = names(prepared)?;
+        if children != names(existing)? {
+            return Ok(false);
+        }
+        for child in children {
+            if !same_store_tree(&prepared.join(&child), &existing.join(child))? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    if !left.is_file()
+        || left.len() != right.len()
+        || left.permissions().mode() != right.permissions().mode()
+    {
+        return Ok(false);
+    }
+    let mut left = fs::File::open(prepared)?;
+    let mut right = fs::File::open(existing)?;
+    let mut a = vec![0; 65536];
+    let mut b = vec![0; 65536];
+    loop {
+        let n = left.read(&mut a)?;
+        if n == 0 {
+            return Ok(right.read(&mut b[..1])? == 0);
+        }
+        right.read_exact(&mut b[..n])?;
+        if a[..n] != b[..n] {
+            return Ok(false);
+        }
     }
 }
 

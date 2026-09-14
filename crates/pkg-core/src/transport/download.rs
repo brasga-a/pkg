@@ -1,8 +1,8 @@
+use futures::StreamExt;
+use reqwest::Client;
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
-use reqwest::Client;
-use futures::StreamExt;
 
 use crate::error::{Error, Result};
 
@@ -34,7 +34,7 @@ impl BoundedDownloader {
     }
 
     /// Creates a new BoundedDownloader with default client configurations and limits.
-    pub fn default() -> Result<Self> {
+    pub fn try_default() -> Result<Self> {
         let client = Client::builder()
             .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(300)) // 5 minute total timeout
@@ -48,15 +48,20 @@ impl BoundedDownloader {
     }
 
     /// Downloads the resource at `url` to the specified `destination` file.
-    /// 
+    ///
     /// Streams the response directly to disk. If the server advertises a Content-Length
     /// exceeding `max_bytes`, or if the streamed body exceeds `max_bytes`, the download
     /// is aborted with an error.
     pub async fn download_to_file(&self, url: &str, destination: &Path) -> Result<()> {
-        let response = self.client.get(url).send().await
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
             .map_err(|e| Error::Network(format!("Failed to send request to {url}: {e}")))?;
 
-        let response = response.error_for_status()
+        let response = response
+            .error_for_status()
             .map_err(|e| Error::Network(format!("HTTP error downloading {url}: {e}")))?;
 
         // Pre-flight check on advertised size
@@ -72,27 +77,28 @@ impl BoundedDownloader {
         // Ensure parent directory exists
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create download directory {}: {}", parent.display(), e)
-                ))
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to create download directory {}: {}",
+                    parent.display(),
+                    e
+                )))
             })?;
         }
 
         let mut file = File::create(destination).await.map_err(|e| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create download file {}: {}", destination.display(), e)
-            ))
+            Error::Io(std::io::Error::other(format!(
+                "Failed to create download file {}: {}",
+                destination.display(),
+                e
+            )))
         })?;
 
         let mut downloaded_bytes = 0u64;
         let mut stream = response.bytes_stream();
 
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| {
-                Error::Network(format!("Error reading chunk from {url}: {e}"))
-            })?;
+            let chunk = chunk_result
+                .map_err(|e| Error::Network(format!("Error reading chunk from {url}: {e}")))?;
 
             downloaded_bytes += chunk.len() as u64;
             if downloaded_bytes > self.limits.max_bytes {
@@ -106,18 +112,20 @@ impl BoundedDownloader {
             }
 
             file.write_all(&chunk).await.map_err(|e| {
-                Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to write chunk to {}: {}", destination.display(), e)
-                ))
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to write chunk to {}: {}",
+                    destination.display(),
+                    e
+                )))
             })?;
         }
 
         file.flush().await.map_err(|e| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to flush file {}: {}", destination.display(), e)
-            ))
+            Error::Io(std::io::Error::other(format!(
+                "Failed to flush file {}: {}",
+                destination.display(),
+                e
+            )))
         })?;
 
         Ok(())

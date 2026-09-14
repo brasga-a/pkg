@@ -225,7 +225,7 @@ impl StateDatabase {
         let mut stmt = match self.conn.prepare(
             "INSERT INTO remote_packages 
             (repository_id, name, version, architecture, format, digest, size_bytes, url)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -256,18 +256,18 @@ impl StateDatabase {
         Ok(())
     }
 
-    /// Searches for a remote package by name in the active snapshots.
-    /// Returns the first match (for now).
-    pub fn get_remote_package(&self, name: &str) -> Result<Option<crate::domain::package::RemotePackage>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
+    /// Searches for a remote package by exact name in the active snapshots.
+    /// Returns the first match.
+    pub fn get_remote_package(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::domain::package::RemotePackage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
                  FROM remote_packages
-                 WHERE name = ?1 LIMIT 1"
-            )
-            ?;
-            
+                 WHERE name = ?1 LIMIT 1",
+        )?;
+
         let row_result = stmt.query_row(params![name], |row| {
             Ok(crate::domain::package::RemotePackage {
                 repository_id: row.get(0)?,
@@ -286,6 +286,39 @@ impl StateDatabase {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(Error::Database(e)),
         }
+    }
+
+    /// Searches for remote packages by name (substring matching) across active snapshots.
+    pub fn search_remote_packages(
+        &self,
+        query: &str,
+    ) -> Result<Vec<crate::domain::package::RemotePackage>> {
+        let pattern = format!("%{}%", query);
+        let mut stmt = self.conn.prepare(
+            "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
+                 FROM remote_packages
+                 WHERE name LIKE ?1
+                 ORDER BY name ASC, version DESC",
+        )?;
+
+        let rows = stmt.query_map(params![pattern], |row| {
+            Ok(crate::domain::package::RemotePackage {
+                repository_id: row.get(0)?,
+                name: row.get(1)?,
+                version: row.get(2)?,
+                architecture: row.get(3)?,
+                format: row.get(4)?,
+                digest: row.get(5)?,
+                size_bytes: row.get(6)?,
+                url: row.get(7)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
     }
 
     /// Lists all transactions that did not complete normally.
@@ -340,8 +373,9 @@ impl StateDatabase {
     pub fn record_store_object(&self, obj: &NewStoreObject<'_>) -> Result<()> {
         let now = chrono_now();
         self.conn.execute(
-            "INSERT OR REPLACE INTO store_objects (store_id, package_name, version, architecture, format, digest, store_path, installed_at, is_reachable)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+            "INSERT INTO store_objects (store_id, package_name, version, architecture, format, digest, store_path, installed_at, is_reachable)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+             ON CONFLICT(store_id) DO NOTHING",
             params![
                 obj.store_id,
                 obj.name.as_str(),
@@ -403,6 +437,94 @@ impl StateDatabase {
             params![profile, name.as_str(), version.as_str(), store_id, now],
         )?;
         Ok(())
+    }
+
+    /// Atomically records the promoted store object, active binaries, and package row.
+    /// Keeping these writes in one SQLite transaction preserves the previous package
+    /// state if a database constraint or disk failure interrupts an upgrade.
+    pub fn commit_install_state(
+        &self,
+        profile: &str,
+        package: &crate::domain::package::NormalizedPackage,
+        store_id: &str,
+        store_path: &Path,
+        files: &[std::path::PathBuf],
+        activations: &[(&str, &Path)],
+    ) -> Result<()> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let result = (|| -> Result<()> {
+            let now = chrono_now();
+            self.conn.execute(
+                "INSERT INTO store_objects (store_id, package_name, version, architecture, format, digest, store_path, installed_at, is_reachable)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+                 ON CONFLICT(store_id) DO NOTHING",
+                params![
+                    store_id,
+                    package.name.as_str(),
+                    package.version.as_str(),
+                    package.architecture.as_str(),
+                    package.format.to_string(),
+                    package.digest.to_string(),
+                    store_path.to_str().unwrap_or(""),
+                    now,
+                ],
+            )?;
+            for file in files {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO installed_files (store_id, relative_path) VALUES (?1, ?2)",
+                    params![store_id, file.to_str().unwrap_or("")],
+                )?;
+            }
+            self.conn.execute(
+                "DELETE FROM activations WHERE profile = ?1 AND package_name = ?2",
+                params![profile, package.name.as_str()],
+            )?;
+            for (command, target) in activations {
+                self.conn.execute(
+                    "INSERT INTO activations (profile, command, store_id, package_name, target_path) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![profile, command, store_id, package.name.as_str(), target.to_str().unwrap_or("")],
+                )?;
+            }
+            self.conn.execute(
+                "INSERT INTO packages (profile, name, active_version, active_store_id, installed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(profile, name) DO UPDATE SET active_version=excluded.active_version, active_store_id=excluded.active_store_id, installed_at=excluded.installed_at",
+                params![profile, package.name.as_str(), package.version.as_str(), store_id, chrono_now()],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute("COMMIT", [])?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(error)
+            }
+        }
+    }
+
+    /// Returns recorded activation links and their expected store targets.
+    pub fn activation_targets(&self) -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.target_path, s.store_path, f.relative_path
+             FROM activations a
+             JOIN store_objects s ON s.store_id = a.store_id
+             JOIN installed_files f ON f.store_id = s.store_id
+             WHERE f.relative_path = 'bin/' || a.command OR f.relative_path = 'usr/bin/' || a.command",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let link: String = row.get(0)?;
+            let root: String = row.get(1)?;
+            let relative: String = row.get(2)?;
+            Ok((
+                std::path::PathBuf::from(link),
+                std::path::PathBuf::from(root).join(relative),
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Database)
     }
 
     /// Looks up an installed package by name in a profile.
@@ -534,19 +656,64 @@ impl StateDatabase {
 
     /// Removes a package and its activations from a profile.
     pub fn remove_package_from_profile(&self, profile: &str, package_name: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM activations WHERE profile = ?1 AND package_name = ?2",
-            params![profile, package_name],
-        )?;
-        self.conn.execute(
-            "DELETE FROM packages WHERE profile = ?1 AND name = ?2",
-            params![profile, package_name],
-        )?;
-        Ok(())
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let result = (|| -> Result<()> {
+            self.conn.execute(
+                "DELETE FROM activations WHERE profile = ?1 AND package_name = ?2",
+                params![profile, package_name],
+            )?;
+            self.conn.execute(
+                "DELETE FROM packages WHERE profile = ?1 AND name = ?2",
+                params![profile, package_name],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute("COMMIT", [])?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(error)
+            }
+        }
     }
 
     /// Marks a store object as unreachable and optionally deletes its record.
+    pub fn store_is_referenced(&self, store_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM packages WHERE active_store_id = ?1)",
+            params![store_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Returns the recorded payload target for an activation owned by this package.
+    pub fn activation_target(
+        &self,
+        profile: &str,
+        command: &str,
+        package: &str,
+    ) -> Result<Option<std::path::PathBuf>> {
+        let mut stmt = self.conn.prepare("SELECT s.store_path, f.relative_path FROM activations a JOIN store_objects s ON s.store_id = a.store_id JOIN installed_files f ON f.store_id = s.store_id WHERE a.profile = ?1 AND a.command = ?2 AND a.package_name = ?3 AND f.relative_path IN ('bin/' || ?2, 'usr/bin/' || ?2)")?;
+        let mut rows = stmt.query(params![profile, command, package])?;
+        if let Some(row) = rows.next()? {
+            let root: String = row.get(0)?;
+            let relative: String = row.get(1)?;
+            Ok(Some(std::path::PathBuf::from(root).join(relative)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Deletes an unreferenced store record.
     pub fn remove_store_object(&self, store_id: &str) -> Result<()> {
+        if self.store_is_referenced(store_id)? {
+            return Err(Error::Internal(format!(
+                "Store object is still referenced: {store_id}"
+            )));
+        }
         self.conn.execute(
             "DELETE FROM store_objects WHERE store_id = ?1",
             params![store_id],

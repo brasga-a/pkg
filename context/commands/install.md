@@ -153,6 +153,23 @@ error: command `foo` is already provided by package A
 
 The command fails unless an explicit future conflict-selection mechanism is used.
 
+The same conflict applies to an unmanaged file or a symlink whose target differs
+from recorded ownership. Updates only replace previously owned links. Removal
+preserves user replacements at those paths.
+
+The current local implementation rejects invalid ELF files and unresolved
+`DT_NEEDED` libraries before store promotion. Package-local libraries count as
+resolved only through the binary's effective RPATH/RUNPATH (for example,
+`$ORIGIN/../lib`); merely placing a library under `usr/lib` does not make it
+visible to the host loader. This does not constitute complete symbol-version or
+ABI resolution. Payload links must resolve within the extracted package;
+dangling and cyclic links are currently unsupported. Version strings
+must be nonempty, at most 128 bytes, and contain only ASCII letters, digits,
+`.`, `+`, `~`, `:`, and `-`.
+
+Cached remote artifacts are rechecked against the catalog's size and SHA-256.
+New downloads become cache entries only after verification and atomic promotion.
+
 ## Postconditions
 
 Success means:

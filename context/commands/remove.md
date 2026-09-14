@@ -49,6 +49,11 @@ A safe sequence is:
 
 This improves rollback/recovery.
 
+The current implementation deletes a store object immediately only when no
+profile references it. Removing from one profile preserves other profiles'
+package records and executable links. Links are unlinked only when their targets
+still match recorded ownership; user replacements remain untouched.
+
 ## Configuration
 
 MVP packages live inside pkg-owned stores, so package-owned configuration inside the store disappears with the store object.

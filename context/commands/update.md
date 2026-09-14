@@ -33,6 +33,11 @@ repository config
 
 A failed refresh never destroys the previous valid snapshot.
 
+For Debian repositories, each compressed index must match the size and SHA-256
+recorded in the verified InRelease. Both xz and gzip require signed entries; a
+valid signature on an unrelated InRelease alone does not authenticate an index.
+Repository updates hold the same writer lock used by installation and recovery.
+
 Examples of failure:
 - network error;
 - malformed metadata;

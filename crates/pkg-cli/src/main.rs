@@ -96,7 +96,7 @@ enum RepoCommands {
 }
 
 fn init_tracing(verbose: bool) {
-    let default_level = if verbose { "debug" } else { "warn" };
+    let default_level = if verbose { "debug" } else { "warn,pgp=error" };
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
@@ -135,8 +135,13 @@ async fn run() -> Result<()> {
             } else {
                 let name = path.to_string_lossy();
                 println!("Searching for remote package '{}'...", name);
-                if let Some(remote_pkg) = engine.search(&name)? {
-                    println!("Found {} {} in {}", remote_pkg.name, remote_pkg.version, remote_pkg.repository_id);
+                let remote_pkg_opt = engine.get_remote_package(&name)?;
+
+                if let Some(remote_pkg) = remote_pkg_opt {
+                    println!(
+                        "Found {} {} in {}",
+                        remote_pkg.name, remote_pkg.version, remote_pkg.repository_id
+                    );
                     if dry_run {
                         println!("Would download {} from {}", remote_pkg.name, remote_pkg.url);
                         return Ok(()); // Avoid downloading on dry-run
@@ -144,7 +149,10 @@ async fn run() -> Result<()> {
                     println!("Downloading {}...", remote_pkg.name);
                     engine.download_remote(&remote_pkg).await?
                 } else {
-                    return Err(anyhow::anyhow!("Package '{}' not found in local paths or remote repositories.", name));
+                    return Err(anyhow::anyhow!(
+                        "Package '{}' not found in local paths or remote repositories.",
+                        name
+                    ));
                 }
             };
 
@@ -239,8 +247,13 @@ async fn run() -> Result<()> {
         Commands::Update => {
             let config_path = engine.layout().base_dir().join("repositories.toml");
             if !config_path.exists() {
-                println!("No repositories.toml found at {}. Generating defaults...", config_path.display());
-                std::fs::write(&config_path, r#"
+                println!(
+                    "No repositories.toml found at {}. Generating defaults...",
+                    config_path.display()
+                );
+                std::fs::write(
+                    &config_path,
+                    r#"
 [[repository]]
 id = "ubuntu-noble"
 url = "http://archive.ubuntu.com/ubuntu"
@@ -252,13 +265,17 @@ id = "debian-bookworm"
 url = "http://deb.debian.org/debian"
 distribution = "bookworm"
 components = ["main", "contrib", "non-free"]
-"#)?;
+"#,
+                )?;
             }
             println!("Reading config from {}...", config_path.display());
             let config = pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?;
             println!("Updating {} repositories...", config.repositories.len());
             let total = engine.update(&config).await?;
-            println!("Successfully updated snapshots. {} remote packages available.", total);
+            println!(
+                "Successfully updated snapshots. {} remote packages available.",
+                total
+            );
         }
         Commands::Repo { command } => {
             let config_path = engine.layout().base_dir().join("repositories.toml");
@@ -268,31 +285,53 @@ components = ["main", "contrib", "non-free"]
                         println!("No repositories configured.");
                         return Ok(());
                     }
-                    let config = pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?;
-                    println!("{:<25} {:<35} {:<15} COMPONENTS", "ID", "URL", "DISTRIBUTION");
+                    let config =
+                        pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?;
+                    println!(
+                        "{:<25} {:<35} {:<15} COMPONENTS",
+                        "ID", "URL", "DISTRIBUTION"
+                    );
                     for repo in config.repositories {
-                        println!("{:<25} {:<35} {:<15} {}", repo.id, repo.url, repo.distribution, repo.components.join(", "));
+                        println!(
+                            "{:<25} {:<35} {:<15} {}",
+                            repo.id,
+                            repo.url,
+                            repo.distribution,
+                            repo.components.join(", ")
+                        );
                     }
                 }
-                RepoCommands::Add { id, url, distribution, components } => {
+                RepoCommands::Add {
+                    id,
+                    url,
+                    distribution,
+                    components,
+                } => {
                     let mut config = if config_path.exists() {
                         pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?
                     } else {
-                        pkg_core::repository::RepositoriesConfig { repositories: vec![] }
+                        pkg_core::repository::RepositoriesConfig {
+                            repositories: vec![],
+                        }
                     };
-                    
+
                     if config.repositories.iter().any(|r| r.id == id) {
-                        return Err(anyhow::anyhow!("Repository with ID '{}' already exists", id));
+                        return Err(anyhow::anyhow!(
+                            "Repository with ID '{}' already exists",
+                            id
+                        ));
                     }
-                    
-                    config.repositories.push(pkg_core::repository::RepositoryConfig {
-                        id: id.clone(),
-                        url: url.clone(),
-                        distribution,
-                        components,
-                        public_key_path: None,
-                    });
-                    
+
+                    config
+                        .repositories
+                        .push(pkg_core::repository::RepositoryConfig {
+                            id: id.clone(),
+                            url: url.clone(),
+                            distribution,
+                            components,
+                            public_key_path: None,
+                        });
+
                     let toml_string = toml::to_string_pretty(&config)?;
                     std::fs::write(&config_path, toml_string)?;
                     println!("Successfully added repository '{}' ({})", id, url);
@@ -301,15 +340,24 @@ components = ["main", "contrib", "non-free"]
             }
         }
         Commands::Search { query } => {
-            if let Some(pkg) = engine.search(&query)? {
-                println!("Found package:");
-                println!("  Name:         {}", pkg.name);
-                println!("  Version:      {}", pkg.version);
-                println!("  Architecture: {}", pkg.architecture);
-                println!("  Repository:   {}", pkg.repository_id);
-                println!("  Size:         {} bytes", pkg.size_bytes);
+            let results = engine.search(&query)?;
+            if results.is_empty() {
+                println!(
+                    "No packages matching '{}' found in active snapshots.",
+                    query
+                );
             } else {
-                println!("Package '{}' not found in active snapshots.", query);
+                println!(
+                    "{:<25} {:<20} {:<10} {:<25} SIZE",
+                    "NAME", "VERSION", "ARCH", "REPOSITORY"
+                );
+                for pkg in &results {
+                    println!(
+                        "{:<25} {:<20} {:<10} {:<25} {} bytes",
+                        pkg.name, pkg.version, pkg.architecture, pkg.repository_id, pkg.size_bytes
+                    );
+                }
+                println!("\nTotal: {} package(s) found.", results.len());
             }
         }
         Commands::Info { target } => {

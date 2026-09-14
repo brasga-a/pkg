@@ -38,7 +38,9 @@ pkg install ./meu-pacote.deb --dry-run
 **Comportamento:**
 - **Local:** Valida a integridade do arquivo, detecta arquitetura, simula ativação de binários e promove para a store.
 - **Remoto:** Busca o pacote no catálogo sincronizado do SQLite, faz o download via HTTP assíncrono para o cache (`cache/artifacts/sha256/`), valida o hash SHA-256 e executa a instalação local rootless.
-- **Conflito de Binário:** Se outro pacote instalado já expõe um executável com o mesmo nome (ex: `bin/hello`), a instalação falha com erro explícito (`ActivationConflict`).
+- **Conflito de Binário:** Outro pacote, arquivo do usuário ou link divergente no destino causa `ActivationConflict`. Uma atualização só substitui um link cujo destino corresponde à propriedade registrada no banco.
+- **Validação antes da promoção:** Versões que não podem compor um caminho seguro, entradas duplicadas, links que escapam do staging e ELF inválido ou com bibliotecas obrigatórias ausentes são rejeitados. Links internos devem resolver dentro do pacote; links pendentes ou cíclicos são rejeitados nesta implementação.
+- **Cache:** Entradas existentes têm tamanho e SHA-256 revalidados. Downloads usam arquivos temporários e só recebem o nome definitivo após a verificação.
 
 ---
 
@@ -54,7 +56,7 @@ pkg remove hello-world --dry-run
 ```
 
 **Comportamento:**
-- Remove atomicamente os symlinks do perfil em `profiles/<perfil>/bin/`.
+- Remove os symlinks do perfil em `profiles/<perfil>/bin/` quando o destino ainda corresponde ao registrado. Arquivos ou links substituídos pelo usuário são preservados.
 - Remove a pasta do pacote na `store/` se não houver referências pendentes.
 - Atualiza o registro no SQLite de forma idempotente e segura.
 
@@ -106,7 +108,7 @@ pkg update
 **Comportamento:**
 - Lê a lista de repositórios declarada em `repositories.toml`. Se o arquivo não existir, cria um arquivo padrão contendo os repositórios do **Ubuntu Noble** e **Debian Bookworm**.
 - Baixa o arquivo `InRelease` de cada repositório e **valida criptograficamente sua assinatura GPG**.
-- Baixa e descompacta os índices de pacotes (`Packages.xz` ou `Packages.gz`).
+- Baixa os índices (`Packages.xz` ou `Packages.gz`) e confere tamanho e SHA-256 contra o conteúdo autenticado do `InRelease` antes de descompactá-los. O fallback gzip também precisa estar listado no conteúdo assinado.
 - Executa um commit atômico no banco de dados SQLite local, substituindo o catálogo antigo pelo novo snapshot.
 - Se o download ou validação falhar, o catálogo anterior permanece ativo sem corrupção.
 
@@ -151,3 +153,9 @@ Adiciona um novo repositório ao arquivo `repositories.toml`:
 pkg repo add debian-sid http://deb.debian.org/debian sid main contrib non-free
 ```
 Após adicionar, basta rodar `pkg update` para indexar os novos pacotes.
+
+## Concorrência e recuperação
+
+A inicialização adquire o lock exclusivo antes de abrir o banco e recuperar transações. Instalação, remoção, download para o cache e atualização do catálogo usam o mesmo lock. Enquanto outro escritor estiver ativo, um novo comando, inclusive `list`, pode retornar `LockError`; ele não tenta recuperar uma transação ainda em andamento.
+
+Perfis usam nomes compostos por letras ASCII, números, ponto, hífen e sublinhado; nomes vazios, `.` e `..` não são aceitos como alvos de instalação ou remoção.

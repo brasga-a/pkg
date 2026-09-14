@@ -63,14 +63,38 @@ pub fn inspect_elf(elf_path: &Path, staging_root: Option<&Path>) -> Result<Optio
         needed.push(lib.to_string());
 
         let mut found = false;
-        // Check staging root first if provided (package-local library)
+        // Resolve paths in the same order the dynamic loader uses for package-local
+        // binaries: RUNPATH (or RPATH when RUNPATH is absent), then host defaults.
         if let Some(staging) = staging_root {
-            for sub in &["usr/lib", "lib", "usr/lib64", "lib64"] {
-                if staging.join(sub).join(lib).exists() {
-                    found = true;
+            let origin = elf_path.parent().unwrap_or(staging);
+            let search_paths = if !elf.runpaths.is_empty() {
+                &elf.runpaths
+            } else {
+                &elf.rpaths
+            };
+            for raw_path in search_paths {
+                for path in raw_path.split(':') {
+                    let expanded = path
+                        .replace("${ORIGIN}", &origin.to_string_lossy())
+                        .replace("$ORIGIN", &origin.to_string_lossy());
+                    let candidate = if Path::new(&expanded).is_absolute() {
+                        Path::new(&expanded).to_path_buf()
+                    } else {
+                        origin.join(expanded)
+                    };
+                    if candidate.join(lib).exists() {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
                     break;
                 }
             }
+            // A library merely sitting in the package's `usr/lib` is not
+            // visible to the host loader after activation. It is usable only
+            // when the ELF's RPATH/RUNPATH resolves it (or a future runtime
+            // wrapper explicitly supplies a search path).
         }
 
         // Check host standard directories

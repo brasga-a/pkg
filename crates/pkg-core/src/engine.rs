@@ -15,7 +15,7 @@ use crate::format::{ArtifactAdapter, ExtractionLimits};
 use crate::host::elf::inspect_elf;
 use crate::lock::ProcessLock;
 use crate::planner::Planner;
-use crate::state::{NewStoreObject, StateDatabase};
+use crate::state::StateDatabase;
 use crate::store::StoreLayout;
 use crate::transaction::Recovery;
 
@@ -38,6 +38,7 @@ pub struct Engine {
 impl Engine {
     /// Initializes or opens an engine using the provided store layout.
     pub fn open(layout: StoreLayout) -> Result<Self> {
+        let _lock = ProcessLock::acquire(&layout.lock_path())?;
         layout.ensure_dirs()?;
         let db = StateDatabase::open(&layout.db_path())?;
 
@@ -87,6 +88,9 @@ impl Engine {
         // Plan installation
         let mut plan =
             Planner::plan_install(artifact_path, &self.layout, &self.db, profile, false)?;
+        let old_binaries = self
+            .db
+            .get_activated_binaries(profile, plan.package.name.as_str())?;
 
         let tx_id = format!(
             "tx-{}",
@@ -118,7 +122,14 @@ impl Engine {
         self.db.update_transaction_phase(&tx_id, "Prepared")?;
         for file in &report.extracted_files {
             let full_path = staging_dir.join(file);
-            if let Ok(Some(inspection)) = inspect_elf(&full_path, Some(&staging_dir)) {
+            if let Some(inspection) = inspect_elf(&full_path, Some(&staging_dir))? {
+                if !inspection.missing_libraries.is_empty() {
+                    return Err(Error::IncompatibleHost(format!(
+                        "{} requires missing libraries: {}",
+                        file.display(),
+                        inspection.missing_libraries.join(", ")
+                    )));
+                }
                 for lib in inspection.resolved_libraries {
                     if !plan.host_libraries_verified.contains(&lib) {
                         plan.host_libraries_verified.push(lib);
@@ -134,36 +145,48 @@ impl Engine {
 
         // 5. Transaction Activating (symlink executables into profile bin)
         self.db.update_transaction_phase(&tx_id, "Activating")?;
+        let stale = old_binaries
+            .iter()
+            .filter(|command| {
+                !plan
+                    .binaries
+                    .iter()
+                    .any(|binary| &binary.command == *command)
+            })
+            .map(|command| {
+                Ok((
+                    self.layout.profile_bin_dir(profile).join(command),
+                    self.db
+                        .activation_target(profile, command, plan.package.name.as_str())?
+                        .ok_or_else(|| {
+                            Error::Internal(format!("Missing activation ownership for {command}"))
+                        })?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (stale_paths, stale_targets): (Vec<_>, Vec<_>) = stale.into_iter().unzip();
+        Activator::deactivate(&stale_paths, &stale_targets)?;
         Activator::activate(&plan, &self.layout.profile_bin_dir(profile))?;
 
         // 6. Transaction Committing (commit state DB records)
         self.db.update_transaction_phase(&tx_id, "Committing")?;
-        self.db.record_store_object(&NewStoreObject {
-            store_id: &plan.store_id,
-            name: &plan.package.name,
-            version: &plan.package.version,
-            architecture: &plan.package.architecture,
-            format: plan.package.format,
-            digest: &plan.package.digest,
-            store_path: &plan.target_store_dir,
-            files: &report.extracted_files,
-        })?;
-
-        for bin in &plan.binaries {
-            self.db.record_activation(
-                profile,
-                &bin.command,
-                &plan.store_id,
-                plan.package.name.as_str(),
-                &bin.profile_symlink_path,
-            )?;
-        }
-
-        self.db.record_package(
+        let activations = plan
+            .binaries
+            .iter()
+            .map(|binary| {
+                (
+                    binary.command.as_str(),
+                    binary.profile_symlink_path.as_path(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.db.commit_install_state(
             profile,
-            &plan.package.name,
-            &plan.package.version,
+            &plan.package,
             &plan.store_id,
+            &plan.target_store_dir,
+            &report.extracted_files,
+            &activations,
         )?;
 
         // 7. Transaction Completed
@@ -215,15 +238,16 @@ impl Engine {
         )?;
 
         // Deactivate profile binary symlinks
-        Activator::deactivate(&plan.binaries_to_remove)?;
+        Activator::deactivate(&plan.binaries_to_remove, &plan.expected_targets)?;
 
         // Remove from database
         self.db.remove_package_from_profile(profile, package_name)?;
-        self.db.remove_store_object(&plan.store_id)?;
-
-        // Physical store cleanup
-        if plan.store_path.exists() {
-            let _ = fs::remove_dir_all(&plan.store_path);
+        if !self.db.store_is_referenced(&plan.store_id)? {
+            self.layout.validate_store_path(&plan.store_path)?;
+            if plan.store_path.exists() {
+                fs::remove_dir_all(&plan.store_path)?;
+            }
+            self.db.remove_store_object(&plan.store_id)?;
         }
 
         self.db.update_transaction_phase(&tx_id, "Completed")?;
@@ -232,20 +256,42 @@ impl Engine {
     }
 
     /// Updates local repository snapshots using the provided configuration.
+    ///
+    /// Repositories (and their internal components) are fetched and verified in parallel
+    /// using asynchronous tasks, followed by atomic snapshot commits to SQLite.
     pub async fn update(&self, config: &crate::repository::RepositoriesConfig) -> Result<usize> {
-        let mut total_packages = 0;
+        let _lock = ProcessLock::acquire(&self.layout.lock_path())?;
         let keyrings_dir = self.layout.keyrings_dir();
-        for repo in &config.repositories {
-            let key_path = repo.public_key_path.as_deref();
-            let packages = crate::repository::deb::update_debian_repository(
-                &repo.url,
-                &repo.distribution,
-                &repo.components,
-                key_path,
-                &keyrings_dir,
-            )
-            .await?;
 
+        // Concurrently fetch and verify all repositories
+        let fetch_futures = config.repositories.iter().map(|repo| {
+            let keyrings_dir = keyrings_dir.clone();
+            let repo = repo.clone();
+            async move {
+                let key_path = repo.public_key_path.as_deref();
+                let packages = crate::repository::deb::update_debian_repository(
+                    &repo.url,
+                    &repo.distribution,
+                    &repo.components,
+                    key_path,
+                    &keyrings_dir,
+                )
+                .await?;
+                Ok::<
+                    (
+                        crate::repository::RepositoryConfig,
+                        Vec<crate::domain::package::RemotePackage>,
+                    ),
+                    Error,
+                >((repo, packages))
+            }
+        });
+
+        let results = futures::future::join_all(fetch_futures).await;
+
+        let mut total_packages = 0;
+        for res in results {
+            let (repo, packages) = res?;
             self.db.commit_repository_snapshot(
                 &repo.id,
                 &repo.url,
@@ -254,39 +300,71 @@ impl Engine {
             )?;
             total_packages += packages.len();
         }
+
         Ok(total_packages)
     }
 
-    /// Searches for a remote package in the active snapshots.
-    pub fn search(&self, name: &str) -> Result<Option<crate::domain::package::RemotePackage>> {
+    /// Searches for remote packages matching a query (substring) in active snapshots.
+    pub fn search(&self, query: &str) -> Result<Vec<crate::domain::package::RemotePackage>> {
+        self.db.search_remote_packages(query)
+    }
+
+    /// Looks up a remote package by exact name in active snapshots.
+    pub fn get_remote_package(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::domain::package::RemotePackage>> {
         self.db.get_remote_package(name)
     }
 
     /// Downloads a remote package to the digest-addressed artifact cache.
-    pub async fn download_remote(&self, pkg: &crate::domain::package::RemotePackage) -> Result<std::path::PathBuf> {
+    pub async fn download_remote(
+        &self,
+        pkg: &crate::domain::package::RemotePackage,
+    ) -> Result<std::path::PathBuf> {
+        if pkg.digest.len() != 64 || !pkg.digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::SecurityViolation(
+                "Invalid SHA256 digest in repository metadata".into(),
+            ));
+        }
+        let _lock = ProcessLock::acquire(&self.layout.lock_path())?;
         let dest = self.layout.artifact_cache_path(&pkg.digest);
-        if dest.exists() {
-            return Ok(dest); // Already cached
+        if let Ok(metadata) = fs::symlink_metadata(&dest) {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(Error::SecurityViolation(
+                    "Invalid artifact cache entry".into(),
+                ));
+            }
+            if DebAdapter::compute_digest(&dest)?
+                .hex()
+                .eq_ignore_ascii_case(&pkg.digest)
+                && metadata.len() == pkg.size_bytes
+            {
+                return Ok(dest);
+            }
+            fs::remove_file(&dest)?;
+            return Err(Error::SecurityViolation(
+                "Artifact cache size or digest mismatch".into(),
+            ));
         }
 
-        let downloader = crate::transport::BoundedDownloader::default()?;
-        downloader.download_to_file(&pkg.url, &dest).await?;
-
-        // Digest verification
-        let data = std::fs::read(&dest).map_err(|e| crate::error::Error::Io(e))?;
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        hasher.update(&data);
-        let hash = format!("{:x}", hasher.finalize());
-
-        if hash != pkg.digest {
-            let _ = std::fs::remove_file(&dest);
+        fs::create_dir_all(dest.parent().unwrap())?;
+        let temporary = tempfile::NamedTempFile::new_in(dest.parent().unwrap())?;
+        let downloader = crate::transport::BoundedDownloader::try_default()?;
+        downloader
+            .download_to_file(&pkg.url, temporary.path())
+            .await?;
+        let hash = DebAdapter::compute_digest(temporary.path())?;
+        if !hash.hex().eq_ignore_ascii_case(&pkg.digest)
+            || fs::metadata(temporary.path())?.len() != pkg.size_bytes
+        {
             return Err(crate::error::Error::SecurityViolation(format!(
-                "Artifact cache mismatch: expected {}, got {}",
+                "Artifact size or digest mismatch: expected {}, got {}",
                 pkg.digest, hash
             )));
         }
-
+        temporary.as_file().sync_all()?;
+        temporary.persist(&dest).map_err(|e| Error::Io(e.error))?;
         Ok(dest)
     }
 
