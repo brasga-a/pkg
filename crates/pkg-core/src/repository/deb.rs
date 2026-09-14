@@ -60,12 +60,14 @@ pub async fn update_debian_repository(
             
             let mut decoder = GzDecoder::new(&gz_bytes[..]);
             let mut text = String::new();
-            decoder.read_to_string(&mut text).map_err(|e| Error::Io(e))?;
+            decoder.read_to_string(&mut text).map_err(Error::Io)?;
             parse_packages_file(&text, url, distribution, &mut packages);
         } else {
-            let mut decoder = XzDecoder::new(&raw_bytes[..]);
+            let stream = xz2::stream::Stream::new_auto_decoder(u64::MAX, xz2::stream::CONCATENATED)
+                .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            let mut decoder = XzDecoder::new_stream(&raw_bytes[..], stream);
             let mut text = String::new();
-            decoder.read_to_string(&mut text).map_err(|e| Error::Io(e))?;
+            decoder.read_to_string(&mut text).map_err(Error::Io)?;
             parse_packages_file(&text, url, distribution, &mut packages);
         }
     }
