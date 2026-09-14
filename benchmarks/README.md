@@ -1,108 +1,165 @@
 # pkg Benchmarking Suite
 
-Este diretório contém uma suíte completa de benchmarking para o `pkg`, permitindo medir latência de instalação, remoção e inspeção de pacotes `.deb`, além de comparar o desempenho de forma justa e reproduzível contra ferramentas tradicionais como `dpkg` e `apt`.
+This directory contains performance benchmarks for `pkg`.
 
----
+There are two distinct suites:
 
-## Estrutura dos Arquivos
-
-```
+```text
 benchmarks/
-├── README.md             # Este guia completo de metodologia e execução
-├── run.sh                # Script principal de execução dos testes
-├── fallback_bench.py     # Executor de benchmark nativo em Python (quando hyperfine não estiver instalado)
-├── plot.py               # Gerador de gráficos (gráfico ASCII no terminal e PNG com matplotlib)
-└── results/              # Pasta onde os relatórios (Markdown, JSON, PNG) são salvos
+├── run.sh                # local .deb install/info and optional dpkg comparison
+├── cli_commands.py       # CLI/catalog benchmark for 0.1.0-alpha.2 commands
+├── fallback_bench.py
+├── plot.py
+└── results/
 ```
 
----
+The two suites answer different questions and their numbers should not be mixed into one speedup claim.
 
-## Pré-requisitos Recomendados
+## 1. Local install benchmark
 
-Para a medição mais precisa possível, recomendamos ter o [`hyperfine`](https://github.com/sharkdp/hyperfine) instalado:
-
-```bash
-cargo install hyperfine
-```
-
-> **Nota:** Se você não tiver o `hyperfine` instalado, o `run.sh` utilizará automaticamente o `fallback_bench.py`, medindo os tempos com precisão de nanossegundos (`time.perf_counter_ns`) em Python 3 puro.
-
-Certifique-se também de compilar o `pkg` em modo otimizado:
-```bash
-cargo build --release
-```
-
----
-
-## Como Executar
-
-### 1. Benchmark Padrão (Pacote `hello-world`)
-Executa medições de `pkg info`, `pkg install` e `pkg remove` no pacote de exemplo:
+The original runner measures the local artifact path:
 
 ```bash
 ./benchmarks/run.sh
+./benchmarks/run.sh ~/Downloads/discord.deb
+./benchmarks/run.sh ~/Downloads/discord.deb --compare-dpkg
 ```
 
-### 2. Benchmark com um Pacote Real (ex: Discord, VS Code, Ripgrep)
-Basta passar o caminho do `.deb` como argumento:
+It is useful for measuring the end-to-end local `.deb` path and, optionally, comparing it with `dpkg -i`.
+
+## 2. CLI/catalog benchmark — 0.1.0-alpha.2
+
+`cli_commands.py` exercises the command paths introduced or expanded in `0.1.0-alpha.2`:
+
+```text
+pkg list                    # empty profile
+pkg list                    # installed profile
+pkg remove
+pkg remove --dry-run
+pkg repo list               # no repositories
+pkg repo add
+pkg repo list               # configured repository
+pkg update
+pkg search                  # hit
+pkg search                  # miss
+pkg install <remote> --dry-run
+```
+
+Run it with the bundled fixture:
 
 ```bash
-./benchmarks/run.sh /caminho/para/discord.deb
+python3 benchmarks/cli_commands.py
 ```
 
-### 3. Comparativo com o `dpkg` (`--compare-dpkg`)
-Para medir o `pkg` lado a lado com o `dpkg -i` tradicional do sistema operacional:
+Or with a real local `.deb` for the installed/remove baselines:
 
 ```bash
-# Aqueça a senha do sudo primeiro para que ela não seja contada no tempo
-sudo true
-
-# Execute o comparativo
-./benchmarks/run.sh /caminho/para/discord.deb --compare-dpkg
+python3 benchmarks/cli_commands.py ~/Downloads/discord.deb \
+  --runs 50 \
+  --warmup 10 \
+  --catalog-size 5000
 ```
 
-### 4. Opções Adicionais
-- `--runs <N>`: Número de repetições por comando (padrão: 15).
-- `--warmup <N>`: Número de rodadas de aquecimento descartadas (padrão: 3).
-- `--output-dir <DIR>`: Diretório para salvar os relatórios gerados (padrão: `benchmarks/results`).
+Options:
 
----
-
-## Metodologia Científica e Justa
-
-Para garantir que os resultados sejam confiáveis e aceitos por comunidades como **r/rust**, **r/linux** e **Hacker News**:
-
-1. **Warmup (Aquecimento de Cache):**
-   - São executadas rodadas preliminares para que o cache de I/O do sistema de arquivos e o carregamento do binário não enviesem a primeira execução.
-2. **Ambiente Limpo a Cada Rodada (`--prepare`):**
-   - Antes de cada medição de instalação, o pacote anterior é limpo para que o teste sempre meça uma instalação limpa e real.
-3. **Isolamento de Processo:**
-   - O `pkg` roda em modo rootless (`~/.local/share/pkg`), medindo tanto o tempo de descompressão, gravação em disco, transação no SQLite quanto a ativação de symlinks.
-4. **Tratamento de Outliers:**
-   - O `hyperfine` calcula média aritmética ($\mu$) e desvio padrão ($\sigma$), alertando caso algum processo em segundo plano interfira nas medições.
-
----
-
-## Gerando Gráficos para Publicação
-
-Após rodar o benchmark, os resultados são salvos em `benchmarks/results/results.json`. Para gerar gráficos visuais:
-
-```bash
-python3 benchmarks/plot.py
+```text
+--runs N           measured samples per command (default: 30)
+--warmup N         discarded warmup samples (default: 5)
+--catalog-size N   number of fake remote packages in the deterministic catalog (default: 1000)
+--profile NAME     profile used by installed/list/remove cases
+--output-dir DIR   result root (default: benchmarks/results)
 ```
 
-- Exibe um **gráfico de barras ASCII** diretamente no terminal (ótimo para copiar para markdown).
-- Se a biblioteca `matplotlib` estiver instalada (`pip install matplotlib`), gera uma imagem `results.png` em alta definição e tema escuro, pronta para postar no Twitter/X, Reddit ou LinkedIn.
+## Deterministic local repository
 
----
+The CLI/catalog suite does **not** use Debian or Ubuntu mirrors during timing.
 
-## Dicas para Postar nas Redes Sociais
+It creates a Debian-style repository fixture in a temporary directory and serves it over `127.0.0.1` using Python's HTTP server. The fixture contains:
 
-Ao publicar os resultados:
-1. **Compartilhe o Contexto Técnico:**
-   - Enfatize que o `pkg` é **rootless** (não precisa de `sudo`).
-   - Explique que o ganho vem do streaming puro em memória em Rust (`flate2`/`xz2`), banco SQLite WAL transacional e ativação de symlinks sem scripts `postinst` pesados.
-2. **Adicione as Tabelas do `results.md`:**
-   - A tabela Markdown gerada em `benchmarks/results/results.md` pode ser colada diretamente em posts do Reddit ou GitHub Issues/Discussions.
-3. **Inclua o link do repositório:**
-   - Permita que outras pessoas reproduzam os mesmos números facilmente rodando `./benchmarks/run.sh`.
+```text
+dists/bench/InRelease
+dists/bench/main/binary-amd64/Packages.gz
+```
+
+`Packages.gz` contains the requested `--catalog-size` number of synthetic package records, including a known package called `bench-target`.
+
+This makes `pkg update` include the actual alpha.2 path:
+
+```text
+HTTP fetch
+  -> InRelease
+  -> Packages.xz probe / Packages.gz fetch
+  -> decompression
+  -> package metadata parsing
+  -> SQLite snapshot commit
+```
+
+while avoiding public-network latency and mirror variance.
+
+The generated catalog baseline is then reused for `search` and remote `install --dry-run`, so those tests measure local catalog/query behavior rather than synchronization.
+
+## Reproducible state
+
+Each measured command starts from a dedicated logical baseline copied outside the timed interval:
+
+```text
+empty baseline
+  -> list empty
+  -> repo list empty
+  -> repo add
+
+installed baseline
+  -> list installed
+  -> remove
+  -> remove --dry-run
+
+repo-configured baseline
+  -> repo list configured
+  -> update
+
+catalog baseline
+  -> search hit
+  -> search miss
+  -> install remote --dry-run
+```
+
+The benchmark never uses the developer's normal `~/.local/share/pkg` state.
+
+## Results
+
+Each run creates a timestamped directory:
+
+```text
+benchmarks/results/<timestamp>-cli-alpha2/
+├── results.json
+├── results.md
+└── environment.txt
+```
+
+The report records, for each command:
+
+- mean;
+- standard deviation;
+- median;
+- p95;
+- minimum/maximum;
+- raw samples.
+
+`environment.txt` records the commit, branch, artifact digest, catalog size, CPU/kernel information, run count, warmup count and local repository endpoint.
+
+## Interpreting the numbers
+
+Do not compare `pkg search` directly with `pkg remove` and call one “faster”; they perform different work.
+
+The intended use is regression tracking by row:
+
+```text
+pkg search (hit)
+commit A: 2.1 ms
+commit B: 2.0 ms
+commit C: 5.7 ms  <- investigate
+```
+
+For `pkg update`, always report `--catalog-size` because update cost should be interpreted as a function of catalog size.
+
+External comparisons against `apt update`, `apt-cache search`, or other package managers should be a separate benchmark with equivalent repository datasets and clearly documented semantic differences.
