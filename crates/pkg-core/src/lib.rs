@@ -9,6 +9,7 @@ pub mod host;
 pub mod lock;
 pub mod planner;
 pub mod repository;
+pub mod resolver;
 pub mod state;
 pub mod store;
 pub mod transaction;
@@ -16,6 +17,7 @@ pub mod transport;
 
 pub use engine::{Engine, PackageInfo};
 pub use error::{Error, Result};
+pub use resolver::{ResolutionError, ResolutionPlan, Resolver};
 pub use store::StoreLayout;
 
 /// Returns the library core version.

@@ -60,6 +60,7 @@ fn test_repository_snapshot_atomic_commit_and_search() {
         .db()
         .commit_repository_snapshot(
             "test-repo",
+            "deb",
             "http://example.com/debian",
             "stable",
             std::slice::from_ref(&remote_pkg),
@@ -320,6 +321,7 @@ async fn tampered_indices_and_signatures_preserve_previous_snapshot() {
             .db()
             .commit_repository_snapshot(
                 "test",
+                "deb",
                 &server.url,
                 "testsuite",
                 &[remote_package("unused", "0".repeat(64), 0)],
@@ -328,6 +330,7 @@ async fn tampered_indices_and_signatures_preserve_previous_snapshot() {
         let config = RepositoriesConfig {
             repositories: vec![RepositoryConfig {
                 id: "test".into(),
+                format: "deb".into(),
                 url: server.url.clone(),
                 distribution: "testsuite".into(),
                 components: vec!["main".into()],

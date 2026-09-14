@@ -14,6 +14,10 @@ pub struct RepositoryConfig {
     /// Unique identifier for this repository (e.g., "debian-bookworm-main")
     pub id: String,
 
+    /// Repository format/ecosystem ("deb", "rpm", "alpm"). Defaults to "deb".
+    #[serde(default = "default_repo_format")]
+    pub format: String,
+
     /// Base URL of the repository (e.g., "http://deb.debian.org/debian")
     pub url: String,
 
@@ -21,10 +25,15 @@ pub struct RepositoryConfig {
     pub distribution: String,
 
     /// List of components to fetch (e.g., ["main", "contrib", "non-free"])
+    #[serde(default)]
     pub components: Vec<String>,
 
     /// Path to a GPG public key or keyring to verify InRelease
     pub public_key_path: Option<PathBuf>,
+}
+
+fn default_repo_format() -> String {
+    "deb".to_string()
 }
 
 impl RepositoriesConfig {

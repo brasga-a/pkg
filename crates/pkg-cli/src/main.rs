@@ -84,6 +84,9 @@ enum RepoCommands {
     Add {
         /// Unique identifier for the repository (e.g., ubuntu-noble)
         id: String,
+        /// Repository format ecosystem (deb, rpm, alpm)
+        #[arg(long, default_value = "deb")]
+        format: String,
         /// Repository base URL (e.g., http://archive.ubuntu.com/ubuntu)
         url: String,
         /// Distribution suite (e.g., noble)
@@ -288,13 +291,14 @@ components = ["main", "contrib", "non-free"]
                     let config =
                         pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?;
                     println!(
-                        "{:<25} {:<35} {:<15} COMPONENTS",
-                        "ID", "URL", "DISTRIBUTION"
+                        "{:<20} {:<8} {:<35} {:<15} COMPONENTS",
+                        "ID", "FORMAT", "URL", "DISTRIBUTION"
                     );
                     for repo in config.repositories {
                         println!(
-                            "{:<25} {:<35} {:<15} {}",
+                            "{:<20} {:<8} {:<35} {:<15} {}",
                             repo.id,
+                            repo.format,
                             repo.url,
                             repo.distribution,
                             repo.components.join(", ")
@@ -303,6 +307,7 @@ components = ["main", "contrib", "non-free"]
                 }
                 RepoCommands::Add {
                     id,
+                    format,
                     url,
                     distribution,
                     components,
@@ -326,6 +331,7 @@ components = ["main", "contrib", "non-free"]
                         .repositories
                         .push(pkg_core::repository::RepositoryConfig {
                             id: id.clone(),
+                            format,
                             url: url.clone(),
                             distribution,
                             components,

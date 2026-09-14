@@ -10,8 +10,8 @@ use crate::domain::installed::InstalledPackage;
 use crate::domain::package::NormalizedPackage;
 use crate::domain::plan::{InstallPlan, RemovePlan};
 use crate::error::{Error, Result};
+use crate::format::ExtractionLimits;
 use crate::format::deb::DebAdapter;
-use crate::format::{ArtifactAdapter, ExtractionLimits};
 use crate::host::elf::inspect_elf;
 use crate::lock::ProcessLock;
 use crate::planner::Planner;
@@ -114,7 +114,8 @@ impl Engine {
         let staging_dir = self.layout.staging_dir(&tx_id);
         self.db.update_transaction_phase(&tx_id, "Staging")?;
 
-        let adapter = DebAdapter::new();
+        let format = crate::format::detect_format(artifact_path)?;
+        let adapter = crate::format::get_adapter(format);
         let report =
             adapter.extract_payload(artifact_path, &staging_dir, &ExtractionLimits::default())?;
 
@@ -294,6 +295,7 @@ impl Engine {
             let (repo, packages) = res?;
             self.db.commit_repository_snapshot(
                 &repo.id,
+                &repo.format,
                 &repo.url,
                 &repo.distribution,
                 &packages,
@@ -377,7 +379,8 @@ impl Engine {
     pub fn info(&self, name_or_path: &str, profile: &str) -> Result<PackageInfo> {
         let path = Path::new(name_or_path);
         if path.exists() && path.is_file() {
-            let adapter = DebAdapter::new();
+            let format = crate::format::detect_format(path)?;
+            let adapter = crate::format::get_adapter(format);
             let meta = adapter.parse_metadata(path)?;
             Ok(PackageInfo::LocalArtifact(meta))
         } else if let Some(installed) = self.db.get_package(profile, name_or_path)? {

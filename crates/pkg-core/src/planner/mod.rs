@@ -5,8 +5,6 @@ use std::path::Path;
 use crate::activation::Activator;
 use crate::domain::plan::{BinaryActivation, InstallPlan, RemovePlan};
 use crate::error::{Error, Result};
-use crate::format::ArtifactAdapter;
-use crate::format::deb::DebAdapter;
 use crate::host::HostFacts;
 use crate::state::StateDatabase;
 use crate::store::StoreLayout;
@@ -28,7 +26,8 @@ impl Planner {
         is_dry_run: bool,
     ) -> Result<InstallPlan> {
         StoreLayout::validate_profile(profile)?;
-        let adapter = DebAdapter::new();
+        let format = crate::format::detect_format(artifact_path)?;
+        let adapter = crate::format::get_adapter(format);
         let package = adapter.parse_metadata(artifact_path)?;
 
         // Check architecture compatibility (Gate M1-A)

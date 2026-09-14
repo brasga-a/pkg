@@ -10,6 +10,7 @@ use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
 use crate::domain::capability::{Capability, Dependency};
+use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstraint, VersionOp};
 use crate::domain::package::{
     Architecture, ArtifactDigest, LifecycleScript, NormalizedPackage, PackageEntry, PackageFormat,
     PackageName, PackageVersion,
@@ -146,6 +147,117 @@ impl DebAdapter {
             });
         }
         deps
+    }
+
+    fn parse_single_debian_constraint(raw_item: &str) -> Option<Constraint> {
+        let item = raw_item.trim();
+        if item.is_empty() {
+            return None;
+        }
+
+        let (name, ver_op, ver_val) = if let Some(open) = item.find('(') {
+            let name = item[..open].trim();
+            let close = item.find(')').unwrap_or(item.len());
+            let inner = item[open + 1..close].trim();
+            let mut parts = inner.split_whitespace();
+            let op_str = parts.next().unwrap_or("");
+            let ver_str = parts.next().unwrap_or("");
+
+            let op = match op_str {
+                ">=" => Some(VersionOp::GreaterEqual),
+                "<=" => Some(VersionOp::LessEqual),
+                ">>" | ">" => Some(VersionOp::Greater),
+                "<<" | "<" => Some(VersionOp::Less),
+                "=" => Some(VersionOp::Exact),
+                _ => None,
+            };
+
+            (
+                name,
+                op,
+                if ver_str.is_empty() {
+                    None
+                } else {
+                    Some(ver_str)
+                },
+            )
+        } else {
+            (item, None, None)
+        };
+
+        let ver_constraint = match (ver_op, ver_val) {
+            (Some(op), Some(val)) => VersionConstraint::Relational(op, PackageVersion::new(val)),
+            _ => VersionConstraint::Any,
+        };
+
+        if name.starts_with("lib") && (name.contains(".so") || name.ends_with(".so")) {
+            Some(Constraint::Capability(CapabilityConstraint {
+                identifier: format!("lib:{name}"),
+                version: ver_constraint,
+                original_expression: raw_item.to_string(),
+            }))
+        } else if let Ok(pkg_name) = PackageName::new(name) {
+            Some(Constraint::Package {
+                name: pkg_name,
+                version: ver_constraint,
+                ecosystem: "debian".to_string(),
+                original_expression: raw_item.to_string(),
+            })
+        } else {
+            Some(Constraint::Capability(CapabilityConstraint {
+                identifier: format!("feature:{name}"),
+                version: ver_constraint,
+                original_expression: raw_item.to_string(),
+            }))
+        }
+    }
+
+    fn parse_constraints(fields: &HashMap<String, String>) -> Vec<Constraint> {
+        let mut constraints = Vec::new();
+
+        if let Some(depends_raw) = fields.get("Depends") {
+            for group in depends_raw.split(',') {
+                let group = group.trim();
+                if group.is_empty() {
+                    continue;
+                }
+                let alternatives: Vec<&str> = group
+                    .split('|')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if alternatives.len() > 1 {
+                    let mut any_of = Vec::new();
+                    for alt in alternatives {
+                        if let Some(c) = Self::parse_single_debian_constraint(alt) {
+                            any_of.push(c);
+                        }
+                    }
+                    if !any_of.is_empty() {
+                        constraints.push(Constraint::AnyOf(any_of));
+                    }
+                } else if let Some(alt) = alternatives.first() {
+                    if let Some(c) = Self::parse_single_debian_constraint(alt) {
+                        constraints.push(c);
+                    }
+                }
+            }
+        }
+
+        if let Some(conflicts_raw) = fields.get("Conflicts").or_else(|| fields.get("Breaks")) {
+            for item in conflicts_raw.split(',') {
+                let item = item.trim();
+                if !item.is_empty() {
+                    let target = item.split_whitespace().next().unwrap_or(item).to_string();
+                    constraints.push(Constraint::Conflict {
+                        target,
+                        original_expression: item.to_string(),
+                    });
+                }
+            }
+        }
+
+        constraints
     }
 
     /// Validates a relative archive path to guarantee it cannot escape the staging root.
@@ -371,11 +483,22 @@ impl ArtifactAdapter for DebAdapter {
             .get("Depends")
             .map(|d| Self::parse_dependencies(d))
             .unwrap_or_default();
+        let constraints = Self::parse_constraints(&fields);
 
         // Parse data.tar.* entries for inventory
         let mut data_tar = Self::make_tar_reader(&data_name, Box::new(Cursor::new(data_bytes)))?;
         let mut entries = Vec::new();
         let mut provides = Vec::new();
+
+        if let Some(provides_raw) = fields.get("Provides") {
+            for p in provides_raw.split(',') {
+                let p = p.trim();
+                if !p.is_empty() {
+                    let name = p.split_whitespace().next().unwrap_or(p);
+                    provides.push(Capability::Feature(name.to_string()));
+                }
+            }
+        }
         let mut seen_paths = HashSet::new();
 
         let data_entries = data_tar.entries().map_err(|e| {
@@ -424,6 +547,15 @@ impl ArtifactAdapter for DebAdapter {
                 }
             }
 
+            // If shared library, inventory SharedLibrary capability
+            if !is_dir {
+                if let Some(filename) = relative_path.file_name().and_then(|n| n.to_str()) {
+                    if filename.contains(".so") {
+                        provides.push(Capability::SharedLibrary(filename.to_string()));
+                    }
+                }
+            }
+
             entries.push(PackageEntry {
                 relative_path,
                 is_dir,
@@ -443,6 +575,7 @@ impl ArtifactAdapter for DebAdapter {
             size_bytes,
             description,
             dependencies,
+            constraints,
             provides,
             scripts,
             entries,

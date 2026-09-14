@@ -33,6 +33,9 @@ tar = { workspace = true }
 flate2 = { workspace = true }
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
+rpm = { workspace = true }
+zstd = { workspace = true }
+serde_json = { workspace = true }
 
 [[test]]
 name = "cli_smoke"
@@ -53,6 +56,10 @@ path = "../../tests/gate_m1_c_transaction.rs"
 [[test]]
 name = "gate_m2_repository"
 path = "../../tests/gate_m2_repository.rs"
+
+[[test]]
+name = "gate_m3_resolver"
+path = "../../tests/gate_m3_resolver.rs"
 
 [[test]]
 name = "review_regressions"

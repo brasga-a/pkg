@@ -95,6 +95,10 @@ futures = "0.3"
 # bytes (M2): Byte buffering for streaming
 bytes = "1.10"
 
+# --- M3 Multi-Format Packaging ---
+# rpm (M3): Pure-Rust RPM header and payload parsing
+rpm = { version = "0.28", default-features = false, features = ["flate2", "zstd", "pgp", "payload"] }
+
 # --- Testing ---
 # tempfile (M0/M1): Isolated temporary directories for tests
 tempfile = "3.17"

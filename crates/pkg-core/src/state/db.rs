@@ -136,6 +136,7 @@ impl StateDatabase {
 
             CREATE TABLE IF NOT EXISTS repositories (
                 id TEXT PRIMARY KEY,
+                format TEXT NOT NULL DEFAULT 'deb',
                 url TEXT NOT NULL,
                 distribution TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -156,6 +157,13 @@ impl StateDatabase {
             CREATE INDEX IF NOT EXISTS idx_remote_packages_name ON remote_packages(name);
             "#,
         )?;
+
+        // Migration: ensure format column exists in repositories for existing databases
+        let _ = self.conn.execute(
+            "ALTER TABLE repositories ADD COLUMN format TEXT NOT NULL DEFAULT 'deb'",
+            (),
+        );
+
         Ok(())
     }
 
@@ -193,6 +201,7 @@ impl StateDatabase {
     pub fn commit_repository_snapshot(
         &self,
         repository_id: &str,
+        format: &str,
         url: &str,
         distribution: &str,
         packages: &[crate::domain::package::RemotePackage],
@@ -202,11 +211,11 @@ impl StateDatabase {
         // Upsert repository info
         let now = chrono_now();
         if let Err(e) = self.conn.execute(
-            "INSERT INTO repositories (id, url, distribution, updated_at) 
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO repositories (id, format, url, distribution, updated_at) 
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET 
-                url=excluded.url, distribution=excluded.distribution, updated_at=excluded.updated_at",
-            params![repository_id, url, distribution, now],
+                format=excluded.format, url=excluded.url, distribution=excluded.distribution, updated_at=excluded.updated_at",
+            params![repository_id, format, url, distribution, now],
         ) {
             let _ = self.conn.execute("ROLLBACK", ());
             return Err(Error::Database(e));

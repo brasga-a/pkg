@@ -293,6 +293,9 @@ pub struct NormalizedPackage {
     pub description: Option<String>,
     /// Declared dependencies.
     pub dependencies: Vec<Dependency>,
+    /// Normalized constraint requirements (ADR-009).
+    #[serde(default)]
+    pub constraints: Vec<crate::domain::constraint::Constraint>,
     /// Provided capabilities (e.g. binaries).
     pub provides: Vec<Capability>,
     /// Inventoried maintainer scripts (not executed).
