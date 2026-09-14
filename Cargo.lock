@@ -1872,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "pkg-cli"
-version = "0.1.0-alpha.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ar",
@@ -1897,7 +1897,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pkg-core"
-version = "0.1.0-alpha.1"
+version = "0.3.0"
 dependencies = [
  "ar",
  "bytes",
