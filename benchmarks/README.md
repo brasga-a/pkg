@@ -10,12 +10,13 @@ O objetivo principal é produzir números **reproduzíveis e auditáveis**, não
 benchmarks/
 ├── README.md
 ├── run.sh
+├── cli_commands.sh
 ├── fallback_bench.py
 ├── merge_results.py
 ├── resource_bench.py
 ├── plot.py
 └── results/
-    └── <timestamp>-<package>-<warm|cold>/
+    └── <timestamp>-<package>-<suite>-<warm|cold>/
         ├── environment.txt
         ├── results.json
         ├── results.md
@@ -41,11 +42,11 @@ cargo build --release
 cargo install hyperfine
 ```
 
-Sem ele, a suíte usa `fallback_bench.py`. O fallback agora aborta se um comando ou preparação falhar; falhas não são contabilizadas como amostras válidas.
+Sem ele, a suíte usa `fallback_bench.py`. O fallback aborta se um comando ou preparação falhar; falhas não são contabilizadas como amostras válidas.
 
 Para as métricas de CPU/memória/I/O é usado GNU `/usr/bin/time -v`, quando disponível.
 
-## Uso
+## Suite end-to-end / operações principais
 
 Benchmark local do `pkg`:
 
@@ -86,7 +87,7 @@ Cold-cache:
   --runs 10
 ```
 
-### Opções
+### Opções do `run.sh`
 
 - `--compare-dpkg`: mede `pkg install` e `dpkg -i` em instalações limpas independentes;
 - `--runs N`: número de execuções cronometradas, padrão 15;
@@ -97,15 +98,93 @@ Cold-cache:
 - `--no-resources`: desativa a passagem com `/usr/bin/time -v`;
 - `--output-dir DIR`: altera a raiz dos resultados.
 
+## Suite de comandos do CLI
+
+`cli_commands.sh` cobre caminhos do CLI que exigem estados diferentes e não devem ser misturados com o benchmark end-to-end de instalação.
+
+Comandos medidos:
+
+```text
+pkg install <artifact> --dry-run
+pkg remove <name> --dry-run
+pkg list                  # estado vazio
+pkg list                  # pacote instalado
+pkg info <name>           # pacote instalado
+```
+
+Execução padrão:
+
+```bash
+./benchmarks/cli_commands.sh
+```
+
+Com um artifact real e mais amostras:
+
+```bash
+./benchmarks/cli_commands.sh ~/Downloads/discord.deb \
+  --runs 50 \
+  --warmup 10 \
+  --cpu 2
+```
+
+Cold-cache:
+
+```bash
+./benchmarks/cli_commands.sh \
+  --cache-mode cold \
+  --runs 20
+```
+
+Outro profile:
+
+```bash
+./benchmarks/cli_commands.sh --profile perf-test
+```
+
+### Metodologia da suite de CLI
+
+A suite constrói duas baselines imutáveis antes de iniciar qualquer medição:
+
+```text
+initialized empty baseline
+          |
+          +------------------------------+
+          |                              |
+          v                              v
+     empty state                 installed state
+                                       |
+                               fixture installed once
+```
+
+Antes de cada amostra, a baseline adequada é copiada para um `--data-dir` descartável:
+
+- `install --dry-run` e `list empty` usam a baseline vazia;
+- `remove --dry-run`, `list installed` e `info <name>` usam a baseline já instalada;
+- a instalação usada para construir a baseline instalada ocorre **fora** da janela cronometrada;
+- o profile é fixado explicitamente para evitar que estado de outros profiles contamine o teste.
+
+Os cinco comandos têm semânticas diferentes. Por isso `results.md` **não calcula speedup relativo entre eles**. O uso correto é acompanhar regressões de cada comando contra seu próprio histórico.
+
+### Opções do `cli_commands.sh`
+
+- `--runs N`: número de execuções cronometradas, padrão 30;
+- `--warmup N`: rodadas descartadas, padrão 5;
+- `--cache-mode warm|cold`: política de page cache;
+- `--cpu LIST`: CPU affinity do comando medido;
+- `--profile NAME`: profile usado pela baseline instalada;
+- `--resource-runs N`: amostras adicionais de recursos;
+- `--no-resources`: desativa coleta via GNU time;
+- `--output-dir DIR`: altera a raiz dos resultados.
+
 ## Estado reproduzível
 
 ### pkg
 
-A suíte **não usa `~/.local/share/pkg`**.
+As suítes **não usam `~/.local/share/pkg`**.
 
-Ela cria um `--data-dir` temporário, inicializa uma baseline vazia e restaura exatamente essa baseline antes de cada execução. Isso evita que histórico de transações, SQLite, store ou profiles de runs anteriores mudem o custo da execução seguinte.
+Elas criam `--data-dir` temporários e restauram baselines conhecidas antes das execuções. Isso evita que histórico de transações, SQLite, store ou profiles de runs anteriores mudem o custo da execução seguinte.
 
-Conceitualmente:
+No benchmark principal, a baseline é vazia:
 
 ```text
 empty initialized baseline
@@ -117,7 +196,9 @@ throwaway pkg data-dir
      timed install
 ```
 
-A preparação fica fora da janela medida.
+Na suite de CLI, a baseline é escolhida de acordo com a precondição semântica do comando.
+
+A preparação sempre fica fora da janela medida.
 
 ### dpkg
 
@@ -212,6 +293,7 @@ Cada run gera `environment.txt` com:
 - warm/cold;
 - runs/warmups;
 - CPU affinity;
+- profile, quando aplicável;
 - linha de comando usada.
 
 Ao publicar resultados, publique também esse arquivo.
