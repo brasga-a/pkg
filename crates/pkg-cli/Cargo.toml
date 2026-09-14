@@ -47,3 +47,8 @@ path = "../../tests/gate_m1_b_store.rs"
 [[test]]
 name = "gate_m1_c_transaction"
 path = "../../tests/gate_m1_c_transaction.rs"
+
+[[test]]
+name = "gate_m2_repository"
+path = "../../tests/gate_m2_repository.rs"
+

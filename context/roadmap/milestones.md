@@ -269,20 +269,20 @@ Extend the local kernel into a remote package workflow: synchronize Debian repos
 
 ### Small tasks
 
-- [ ] Add repository configuration loading and stable repository IDs.
-- [ ] Implement bounded HTTP downloads with Tokio/reqwest.
-- [ ] Separate metadata cache, artifact cache, and temporary downloads.
-- [ ] Implement the first Debian repository metadata adapter.
-- [ ] Verify repository metadata using Debian-compatible trust evidence.
-- [ ] Normalize repository packages into immutable local snapshots.
-- [ ] Atomically switch the active snapshot only after successful parse/verification.
-- [ ] Keep the previous valid snapshot active when refresh fails.
-- [ ] Implement digest-addressed artifact caching and mismatch rejection.
-- [ ] Add `pkg repo list`, `pkg repo add`, and `pkg update` behavior.
-- [ ] Implement repository-backed `pkg search` and `pkg info`.
-- [ ] Implement remote `pkg install <name>` using the M1 transaction executor.
-- [ ] Add explicit offline/stale-metadata behavior.
-- [ ] Add tests for bad signatures, bad digests, interrupted downloads, stale snapshots, and failed refresh rollback.
+- [x] Add repository configuration loading and stable repository IDs.
+- [x] Implement bounded HTTP downloads with Tokio/reqwest.
+- [x] Separate metadata cache, artifact cache, and temporary downloads.
+- [x] Implement the first Debian repository metadata adapter.
+- [x] Verify repository metadata using Debian-compatible trust evidence.
+- [x] Normalize repository packages into immutable local snapshots.
+- [x] Atomically switch the active snapshot only after successful parse/verification.
+- [x] Keep the previous valid snapshot active when refresh fails.
+- [x] Implement digest-addressed artifact caching and mismatch rejection.
+- [x] Add `pkg repo list`, `pkg repo add`, and `pkg update` behavior.
+- [x] Implement repository-backed `pkg search` and `pkg info`.
+- [x] Implement remote `pkg install <name>` using the M1 transaction executor.
+- [x] Add explicit offline/stale-metadata behavior.
+- [x] Add tests for bad signatures, bad digests, interrupted downloads, stale snapshots, and failed refresh rollback.
 
 ### Release gate
 
