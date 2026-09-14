@@ -121,23 +121,23 @@ Dependencies belonging to later milestones should **not** be pulled into runtime
 
 ### Small tasks
 
-- [ ] Create the root Rust 2024 workspace `Cargo.toml`.
-- [ ] Configure the workspace resolver, shared package metadata, profiles, and lint policy.
-- [ ] Create and commit `Cargo.lock` because pkg is an application/workspace, not only a reusable library.
-- [ ] Add `rust-toolchain.toml` with the required Rust channel/components for `rustfmt` and `clippy`.
-- [ ] Create `crates/`.
-- [ ] Create `crates/pkg-cli` as the initial binary crate.
-- [ ] Create `crates/pkg-core` as the smallest library boundary for shared domain/application types.
-- [ ] Keep format/repository/resolver/store/state/host code as internal modules until their crate boundaries are proven; do not create empty placeholder crates.
-- [ ] Add the minimal `pkg` CLI entry point with `--help` and `--version`.
-- [ ] Centralize baseline dependency declarations under `[workspace.dependencies]` where useful.
-- [ ] Add `thiserror` to library/domain error handling and reserve `anyhow` for the CLI/application edge.
-- [ ] Configure `tracing`/`tracing-subscriber` with a minimal local diagnostic subscriber.
-- [ ] Create test directories and a first smoke test that executes `pkg --help`.
-- [ ] Add formatting and lint configuration shared across the workspace.
-- [ ] Add a minimal CI workflow running format, check, test, and clippy on Linux.
-- [ ] Ensure the workspace builds from a clean checkout without generated local files.
-- [ ] Document each non-test dependency's current milestone use before adding it to a concrete crate.
+- [x] Create the root Rust 2024 workspace `Cargo.toml`.
+- [x] Configure the workspace resolver, shared package metadata, profiles, and lint policy.
+- [x] Create and commit `Cargo.lock` because pkg is an application/workspace, not only a reusable library.
+- [x] Add `rust-toolchain.toml` with the required Rust channel/components for `rustfmt` and `clippy`.
+- [x] Create `crates/`.
+- [x] Create `crates/pkg-cli` as the initial binary crate.
+- [x] Create `crates/pkg-core` as the smallest library boundary for shared domain/application types.
+- [x] Keep format/repository/resolver/store/state/host code as internal modules until their crate boundaries are proven; do not create empty placeholder crates.
+- [x] Add the minimal `pkg` CLI entry point with `--help` and `--version`.
+- [x] Centralize baseline dependency declarations under `[workspace.dependencies]` where useful.
+- [x] Add `thiserror` to library/domain error handling and reserve `anyhow` for the CLI/application edge.
+- [x] Configure `tracing`/`tracing-subscriber` with a minimal local diagnostic subscriber.
+- [x] Create test directories and a first smoke test that executes `pkg --help`.
+- [x] Add formatting and lint configuration shared across the workspace.
+- [x] Add a minimal CI workflow running format, check, test, and clippy on Linux.
+- [x] Ensure the workspace builds from a clean checkout without generated local files.
+- [x] Document each non-test dependency's current milestone use before adding it to a concrete crate.
 
 ### Release gate
 
@@ -201,22 +201,22 @@ Prove the smallest safe end-to-end installation path for a supported local `.deb
 
 ### Small tasks
 
-- [ ] Define package/domain IDs, versions, architectures, artifact identity, install plan, transaction ID, and installed-package records.
-- [ ] Implement `.deb` probing and metadata parsing without invoking `dpkg`.
-- [ ] Parse `control.tar.*` and inventory maintainer scripts without executing them.
-- [ ] Implement hardened `data.tar.*` extraction into a staging directory.
-- [ ] Reject path traversal, absolute paths, unsafe symlinks/hardlinks, malformed archives, and extraction-limit violations.
-- [ ] Implement basic host facts for Linux x86_64 and static ELF dependency inspection.
-- [ ] Create the rootless store/profile/state layout.
-- [ ] Create SQLite schema and migrations for artifacts, packages, store objects, activations, and transactions.
-- [ ] Add the single-writer process/file lock.
-- [ ] Implement `InstallPlan` and `--dry-run` with zero host mutation.
-- [ ] Implement staged install → verification → atomic promotion → profile activation → state commit.
-- [ ] Implement startup transaction recovery and DB/store reconciliation.
-- [ ] Implement profile binary symlink/wrapper activation with explicit command-conflict errors.
-- [ ] Implement `pkg install <local.deb>`, `pkg list`, `pkg info`, and `pkg remove` for the supported fixture class.
-- [ ] Add deterministic uninstall and repeated install/remove idempotence tests.
-- [ ] Add fixtures for malformed archives, scripts, architecture mismatch, interrupted transactions, and activation conflicts.
+- [x] Define package/domain IDs, versions, architectures, artifact identity, install plan, transaction ID, and installed-package records.
+- [x] Implement `.deb` probing and metadata parsing without invoking `dpkg`.
+- [x] Parse `control.tar.*` and inventory maintainer scripts without executing them.
+- [x] Implement hardened `data.tar.*` extraction into a staging directory.
+- [x] Reject path traversal, absolute paths, unsafe symlinks/hardlinks, malformed archives, and extraction-limit violations.
+- [x] Implement basic host facts for Linux x86_64 and static ELF dependency inspection.
+- [x] Create the rootless store/profile/state layout.
+- [x] Create SQLite schema and migrations for artifacts, packages, store objects, activations, and transactions.
+- [x] Add the single-writer process/file lock.
+- [x] Implement `InstallPlan` and `--dry-run` with zero host mutation.
+- [x] Implement staged install → verification → atomic promotion → profile activation → state commit.
+- [x] Implement startup transaction recovery and DB/store reconciliation.
+- [x] Implement profile binary symlink/wrapper activation with explicit command-conflict errors.
+- [x] Implement `pkg install <local.deb>`, `pkg list`, `pkg info`, and `pkg remove` for the supported fixture class.
+- [x] Add deterministic uninstall and repeated install/remove idempotence tests.
+- [x] Add fixtures for malformed archives, scripts, architecture mismatch, interrupted transactions, and activation conflicts.
 
 ### Release gates
 

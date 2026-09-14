@@ -1,0 +1,47 @@
+[package]
+name = "pkg-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Command-line interface for pkg package manager"
+
+[[bin]]
+name = "pkg"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+pkg-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }
+ar = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+
+[[test]]
+name = "cli_smoke"
+path = "../../tests/cli_smoke.rs"
+
+[[test]]
+name = "gate_m1_a_parser"
+path = "../../tests/gate_m1_a_parser.rs"
+
+[[test]]
+name = "gate_m1_b_store"
+path = "../../tests/gate_m1_b_store.rs"
+
+[[test]]
+name = "gate_m1_c_transaction"
+path = "../../tests/gate_m1_c_transaction.rs"
