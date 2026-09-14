@@ -16,6 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate benchmark scripts
+        run: |
+          bash -n benchmarks/run.sh
+          python3 -m py_compile \
+            benchmarks/fallback_bench.py \
+            benchmarks/plot.py \
+            benchmarks/cli_commands.py
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
