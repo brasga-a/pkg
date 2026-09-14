@@ -85,6 +85,11 @@ impl StoreLayout {
         self.base_dir.join("cache")
     }
 
+    /// Returns the trusted GPG keyrings directory (`keyrings/`).
+    pub fn keyrings_dir(&self) -> PathBuf {
+        self.base_dir.join("keyrings")
+    }
+
     /// Returns the specific path for a cached artifact addressed by its digest.
     pub fn artifact_cache_path(&self, digest: &str) -> PathBuf {
         // e.g., cache/artifacts/sha256/abc123def...

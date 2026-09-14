@@ -234,6 +234,7 @@ impl Engine {
     /// Updates local repository snapshots using the provided configuration.
     pub async fn update(&self, config: &crate::repository::RepositoriesConfig) -> Result<usize> {
         let mut total_packages = 0;
+        let keyrings_dir = self.layout.keyrings_dir();
         for repo in &config.repositories {
             let key_path = repo.public_key_path.as_deref();
             let packages = crate::repository::deb::update_debian_repository(
@@ -241,6 +242,7 @@ impl Engine {
                 &repo.distribution,
                 &repo.components,
                 key_path,
+                &keyrings_dir,
             )
             .await?;
 

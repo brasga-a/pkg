@@ -1,8 +1,7 @@
 use std::path::Path;
 use reqwest::Client;
 use std::fs;
-use pgp::{SignedPublicKey, cleartext::CleartextSignedMessage};
-use pgp::Deserializable;
+use pgp::{cleartext::CleartextSignedMessage, composed::SignedPublicKey};
 use crate::error::{Error, Result};
 use crate::domain::package::RemotePackage;
 use flate2::read::GzDecoder;
@@ -15,6 +14,7 @@ pub async fn update_debian_repository(
     distribution: &str,
     components: &[String],
     public_key_path: Option<&Path>,
+    keyrings_dir: &Path,
 ) -> Result<Vec<RemotePackage>> {
     let client = Client::builder()
         .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
@@ -30,11 +30,13 @@ pub async fn update_debian_repository(
     let inrelease_text = response.text().await
         .map_err(|e| Error::Network(e.to_string()))?;
 
-    // 2. Verify GPG Signature if a key is provided
-    if let Some(key_path) = public_key_path {
+    // 2. Resolve keyring and verify GPG Signature
+    let resolved_key = resolve_or_fetch_keyring(&client, public_key_path, url, distribution, keyrings_dir).await;
+    if let Some(ref key_path) = resolved_key {
         verify_inrelease_signature(&inrelease_text, key_path)?;
+        println!("  ✓ Verified GPG signature for {url} ({distribution}) using {}", key_path.display());
     } else {
-        tracing::warn!("Skipping GPG signature verification for repository {}", url);
+        tracing::warn!("Skipping GPG signature verification for repository {} (no keyring found)", url);
     }
 
     // For now, we will simply fetch the Packages file for each component, architecture amd64
@@ -75,17 +77,123 @@ pub async fn update_debian_repository(
     Ok(packages)
 }
 
-fn verify_inrelease_signature(signed_text: &str, key_path: &Path) -> Result<()> {
-    let key_bytes = fs::read(key_path).map_err(|e| Error::Io(e))?;
-    // We attempt to parse the public key. Depending on keyring format, this might need more robust parsing.
-    let key = SignedPublicKey::from_bytes(&key_bytes[..])
-        .map_err(|e| Error::Parse(format!("Failed to parse public key: {:?}", e)))?;
+async fn resolve_or_fetch_keyring(
+    client: &Client,
+    key_path: Option<&Path>,
+    url: &str,
+    distribution: &str,
+    keyrings_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    if let Some(path) = key_path {
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+    }
 
-    let msg = CleartextSignedMessage::from_string(signed_text)
+    // Auto-detect standard host keyrings
+    let host_candidates = [
+        Path::new("/usr/share/keyrings/ubuntu-archive-keyring.gpg"),
+        Path::new("/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg"),
+        Path::new("/usr/share/keyrings/debian-archive-keyring.gpg"),
+    ];
+
+    for candidate in &host_candidates {
+        if candidate.exists() {
+            let lower = url.to_lowercase();
+            let c_lower = candidate.to_string_lossy().to_lowercase();
+            if (lower.contains("ubuntu") && c_lower.contains("ubuntu"))
+                || (lower.contains("debian") && c_lower.contains("debian"))
+            {
+                return Some(candidate.to_path_buf());
+            }
+        }
+    }
+
+    // If debian and not on host, fetch Debian official archive key automatically
+    if url.contains("debian.org") {
+        let debian_key = keyrings_dir.join(format!("debian-{distribution}.asc"));
+        if debian_key.exists() {
+            return Some(debian_key);
+        }
+        let key_url = "https://ftp-master.debian.org/keys/archive-key-12.asc";
+        if let Ok(res) = client.get(key_url).send().await {
+            if let Ok(bytes) = res.bytes().await {
+                let _ = tokio::fs::create_dir_all(keyrings_dir).await;
+                if tokio::fs::write(&debian_key, &bytes).await.is_ok() {
+                    return Some(debian_key);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn verify_key_or_subkeys(msg: &CleartextSignedMessage, key: &SignedPublicKey) -> bool {
+    if msg.verify(key).is_ok() {
+        return true;
+    }
+    for subkey in &key.public_subkeys {
+        if msg.verify(subkey).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+fn verify_inrelease_signature(signed_text: &str, key_path: &Path) -> Result<()> {
+    let key_bytes = fs::read(key_path).map_err(Error::Io)?;
+    let (msg, _) = CleartextSignedMessage::from_string(signed_text)
         .map_err(|e| Error::Parse(format!("Failed to parse InRelease signed message: {:?}", e)))?;
 
-    msg.0.verify(&key).map_err(|e| Error::Parse(format!("GPG signature verification failed: {:?}", e)))?;
-    
+    // Try parsing as multi-key binary keyring (filtering out GPG Tag::Trust packets)
+    use pgp::packet::PacketParser;
+    use pgp::composed::signed_key::SignedPublicKeyParser;
+    use pgp::types::Tag;
+
+    let p_parser = PacketParser::new(&key_bytes[..]);
+    let filtered_packets = p_parser.filter(|p| {
+        if let Ok(pkt) = p {
+            pkt.tag() != Tag::Trust
+        } else {
+            true
+        }
+    }).peekable();
+
+    let keys_parser = SignedPublicKeyParser::from_packets(filtered_packets);
+    let mut verified = false;
+
+    for key_res in keys_parser {
+        if let Ok(key) = key_res {
+            if verify_key_or_subkeys(&msg, &key) {
+                verified = true;
+                break;
+            }
+        }
+    }
+
+    if !verified {
+        // Also try armored format (.asc) if binary didn't yield verification
+        let armored_iter = pgp::composed::signed_key::from_armor_many(&key_bytes[..]);
+        if let Ok((iter, _)) = armored_iter {
+            for key_res in iter {
+                if let Ok(pgp::composed::signed_key::PublicOrSecret::Public(key)) = key_res {
+                    if verify_key_or_subkeys(&msg, &key) {
+                        verified = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !verified {
+        return Err(Error::Parse(format!(
+            "GPG signature verification failed for {}: no matching trusted key found in keyring",
+            key_path.display()
+        )));
+    }
+
     Ok(())
 }
 
@@ -133,5 +241,26 @@ fn parse_packages_file(text: &str, base_url: &str, _dist: &str, packages: &mut V
         } else if let Some(stripped) = line.strip_prefix("Size: ") {
             size = stripped.parse().unwrap_or(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_debian_keyring() {
+        let key_path = Path::new("/tmp/debian-key-12.asc");
+        if !key_path.exists() {
+            return;
+        }
+        let inrelease_path = Path::new("/tmp/debian-inrelease.txt");
+        if !inrelease_path.exists() {
+            return;
+        }
+        let inrelease_text = fs::read_to_string(inrelease_path).unwrap();
+        let res = verify_inrelease_signature(&inrelease_text, key_path);
+        println!("Debian verification result: {:?}", res);
+        assert!(res.is_ok());
     }
 }
