@@ -7,7 +7,7 @@ use crate::domain::installed::InstalledPackage;
 use crate::domain::package::{
     Architecture, ArtifactDigest, PackageFormat, PackageName, PackageVersion,
 };
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Database connection and state operations.
 pub struct StateDatabase {
@@ -133,6 +133,27 @@ impl StateDatabase {
                 PRIMARY KEY (store_id, relative_path),
                 FOREIGN KEY (store_id) REFERENCES store_objects(store_id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS repositories (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                distribution TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS remote_packages (
+                repository_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                architecture TEXT NOT NULL,
+                format TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                FOREIGN KEY(repository_id) REFERENCES repositories(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_remote_packages_name ON remote_packages(name);
             "#,
         )?;
         Ok(())
@@ -165,6 +186,106 @@ impl StateDatabase {
             params![phase, now, id],
         )?;
         Ok(())
+    }
+
+    /// Atomically replaces the snapshot of a remote repository.
+    /// This fully drops the old `remote_packages` for this `repository_id` and inserts the new ones.
+    pub fn commit_repository_snapshot(
+        &self,
+        repository_id: &str,
+        url: &str,
+        distribution: &str,
+        packages: &[crate::domain::package::RemotePackage],
+    ) -> Result<()> {
+        self.conn.execute("BEGIN", ())?;
+
+        // Upsert repository info
+        let now = chrono_now();
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO repositories (id, url, distribution, updated_at) 
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET 
+                url=excluded.url, distribution=excluded.distribution, updated_at=excluded.updated_at",
+            params![repository_id, url, distribution, now],
+        ) {
+            let _ = self.conn.execute("ROLLBACK", ());
+            return Err(Error::Database(e));
+        }
+
+        // Delete old packages
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM remote_packages WHERE repository_id = ?1",
+            params![repository_id],
+        ) {
+            let _ = self.conn.execute("ROLLBACK", ());
+            return Err(Error::Database(e));
+        }
+
+        // Insert new packages
+        let mut stmt = match self.conn.prepare(
+            "INSERT INTO remote_packages 
+            (repository_id, name, version, architecture, format, digest, size_bytes, url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = self.conn.execute("ROLLBACK", ());
+                return Err(Error::Database(e));
+            }
+        };
+
+        for pkg in packages {
+            if let Err(e) = stmt.execute(params![
+                repository_id,
+                pkg.name,
+                pkg.version,
+                pkg.architecture,
+                pkg.format,
+                pkg.digest,
+                pkg.size_bytes,
+                pkg.url,
+            ]) {
+                drop(stmt);
+                let _ = self.conn.execute("ROLLBACK", ());
+                return Err(Error::Database(e));
+            }
+        }
+        drop(stmt);
+
+        self.conn.execute("COMMIT", ())?;
+        Ok(())
+    }
+
+    /// Searches for a remote package by name in the active snapshots.
+    /// Returns the first match (for now).
+    pub fn get_remote_package(&self, name: &str) -> Result<Option<crate::domain::package::RemotePackage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
+                 FROM remote_packages
+                 WHERE name = ?1 LIMIT 1"
+            )
+            ?;
+            
+        let row_result = stmt.query_row(params![name], |row| {
+            Ok(crate::domain::package::RemotePackage {
+                repository_id: row.get(0)?,
+                name: row.get(1)?,
+                version: row.get(2)?,
+                architecture: row.get(3)?,
+                format: row.get(4)?,
+                digest: row.get(5)?,
+                size_bytes: row.get(6)?,
+                url: row.get(7)?,
+            })
+        });
+
+        match row_result {
+            Ok(pkg) => Ok(Some(pkg)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Error::Database(e)),
+        }
     }
 
     /// Lists all transactions that did not complete normally.

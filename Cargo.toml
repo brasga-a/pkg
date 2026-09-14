@@ -83,6 +83,18 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # libc (M1): POSIX file locking (flock) for process lock
 libc = "0.2"
 
+# --- M2 Remote Catalog / Async Networking ---
+# tokio (M2): Async runtime for concurrent networking
+tokio = { version = "1.43", features = ["full"] }
+# reqwest (M2): HTTP client for remote repository downloads
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "charset"] }
+# pgp (M2): Pure-Rust GPG signature validation for InRelease trust evidence
+pgp = "0.14"
+# futures (M2): Async stream manipulation
+futures = "0.3"
+# bytes (M2): Byte buffering for streaming
+bytes = "1.10"
+
 # --- Testing ---
 # tempfile (M0/M1): Isolated temporary directories for tests
 tempfile = "3.17"

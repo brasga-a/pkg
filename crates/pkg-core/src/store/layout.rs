@@ -75,6 +75,22 @@ impl StoreLayout {
         self.store_dir().join(store_id)
     }
 
+    /// Returns the active profiles directory (`profiles/`).
+    pub fn profiles_dir(&self) -> PathBuf {
+        self.base_dir.join("profiles")
+    }
+
+    /// Returns the package and metadata cache directory (`cache/`).
+    pub fn cache_dir(&self) -> PathBuf {
+        self.base_dir.join("cache")
+    }
+
+    /// Returns the specific path for a cached artifact addressed by its digest.
+    pub fn artifact_cache_path(&self, digest: &str) -> PathBuf {
+        // e.g., cache/artifacts/sha256/abc123def...
+        self.cache_dir().join("artifacts").join("sha256").join(digest)
+    }
+
     /// Directory containing profiles.
     #[must_use]
     pub fn profiles_root(&self) -> PathBuf {

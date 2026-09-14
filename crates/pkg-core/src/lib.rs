@@ -8,9 +8,11 @@ pub mod format;
 pub mod host;
 pub mod lock;
 pub mod planner;
+pub mod repository;
 pub mod state;
 pub mod store;
 pub mod transaction;
+pub mod transport;
 
 pub use engine::{Engine, PackageInfo};
 pub use error::{Error, Result};

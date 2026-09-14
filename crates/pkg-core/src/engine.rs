@@ -231,7 +231,64 @@ impl Engine {
         Ok(plan)
     }
 
-    /// Lists all installed packages in the specified profile.
+    /// Updates local repository snapshots using the provided configuration.
+    pub async fn update(&self, config: &crate::repository::RepositoriesConfig) -> Result<usize> {
+        let mut total_packages = 0;
+        for repo in &config.repositories {
+            let key_path = repo.public_key_path.as_deref();
+            let packages = crate::repository::deb::update_debian_repository(
+                &repo.url,
+                &repo.distribution,
+                &repo.components,
+                key_path,
+            )
+            .await?;
+
+            self.db.commit_repository_snapshot(
+                &repo.id,
+                &repo.url,
+                &repo.distribution,
+                &packages,
+            )?;
+            total_packages += packages.len();
+        }
+        Ok(total_packages)
+    }
+
+    /// Searches for a remote package in the active snapshots.
+    pub fn search(&self, name: &str) -> Result<Option<crate::domain::package::RemotePackage>> {
+        self.db.get_remote_package(name)
+    }
+
+    /// Downloads a remote package to the digest-addressed artifact cache.
+    pub async fn download_remote(&self, pkg: &crate::domain::package::RemotePackage) -> Result<std::path::PathBuf> {
+        let dest = self.layout.artifact_cache_path(&pkg.digest);
+        if dest.exists() {
+            return Ok(dest); // Already cached
+        }
+
+        let downloader = crate::transport::BoundedDownloader::default()?;
+        downloader.download_to_file(&pkg.url, &dest).await?;
+
+        // Digest verification
+        let data = std::fs::read(&dest).map_err(|e| crate::error::Error::Io(e))?;
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let hash = format!("{:x}", hasher.finalize());
+
+        if hash != pkg.digest {
+            let _ = std::fs::remove_file(&dest);
+            return Err(crate::error::Error::SecurityViolation(format!(
+                "Artifact cache mismatch: expected {}, got {}",
+                pkg.digest, hash
+            )));
+        }
+
+        Ok(dest)
+    }
+
+    /// Lists locally installed packages in the specified profile.
     pub fn list(&self, profile: &str) -> Result<Vec<InstalledPackage>> {
         self.db.list_packages(profile)
     }

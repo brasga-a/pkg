@@ -56,6 +56,15 @@ enum Commands {
     /// List locally installed packages in the profile
     List,
 
+    /// Update local package catalog from configured remote repositories
+    Update,
+
+    /// Search for a package in the remote catalog
+    Search {
+        /// Package name to search for
+        query: String,
+    },
+
     /// Show detailed metadata and state for a package or artifact
     Info {
         /// Package name or path to a local package artifact
@@ -74,7 +83,7 @@ fn init_tracing(verbose: bool) {
         .try_init();
 }
 
-fn run() -> Result<()> {
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
@@ -98,7 +107,25 @@ fn run() -> Result<()> {
 
     match command {
         Commands::Install { path, dry_run } => {
-            let plan = engine.install(&path, &cli.profile, dry_run)?;
+            let artifact_path = if path.exists() {
+                path
+            } else {
+                let name = path.to_string_lossy();
+                println!("Searching for remote package '{}'...", name);
+                if let Some(remote_pkg) = engine.search(&name)? {
+                    println!("Found {} {} in {}", remote_pkg.name, remote_pkg.version, remote_pkg.repository_id);
+                    if dry_run {
+                        println!("Would download {} from {}", remote_pkg.name, remote_pkg.url);
+                        return Ok(()); // Avoid downloading on dry-run
+                    }
+                    println!("Downloading {}...", remote_pkg.name);
+                    engine.download_remote(&remote_pkg).await?
+                } else {
+                    return Err(anyhow::anyhow!("Package '{}' not found in local paths or remote repositories.", name));
+                }
+            };
+
+            let plan = engine.install(&artifact_path, &cli.profile, dry_run)?;
             if dry_run {
                 println!("Install Plan (dry-run):");
                 println!(
@@ -186,6 +213,36 @@ fn run() -> Result<()> {
                 }
             }
         }
+        Commands::Update => {
+            let config_path = engine.layout().base_dir().join("repositories.toml");
+            if !config_path.exists() {
+                println!("No repositories.toml found at {}. Generating a default one...", config_path.display());
+                std::fs::write(&config_path, r#"
+[[repository]]
+id = "debian-bookworm-main"
+url = "http://deb.debian.org/debian"
+distribution = "bookworm"
+components = ["main"]
+"#)?;
+            }
+            println!("Reading config from {}...", config_path.display());
+            let config = pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?;
+            println!("Updating {} repositories...", config.repositories.len());
+            let total = engine.update(&config).await?;
+            println!("Successfully updated snapshots. {} remote packages available.", total);
+        }
+        Commands::Search { query } => {
+            if let Some(pkg) = engine.search(&query)? {
+                println!("Found package:");
+                println!("  Name:         {}", pkg.name);
+                println!("  Version:      {}", pkg.version);
+                println!("  Architecture: {}", pkg.architecture);
+                println!("  Repository:   {}", pkg.repository_id);
+                println!("  Size:         {} bytes", pkg.size_bytes);
+            } else {
+                println!("Package '{}' not found in active snapshots.", query);
+            }
+        }
         Commands::Info { target } => {
             let info = engine.info(&target, &cli.profile)?;
             match info {
@@ -245,6 +302,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    run()
+#[tokio::main]
+async fn main() -> Result<()> {
+    run().await
 }

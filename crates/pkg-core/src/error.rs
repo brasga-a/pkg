@@ -38,6 +38,12 @@ pub enum Error {
     #[error("Incompatible host: {0}")]
     IncompatibleHost(String),
 
+    #[error("Network error: {0}")]
+    Network(String),
+
+    #[error("Parse error: {0}")]
+    Parse(String),
+
     /// Binary command name collision with an already active package.
     #[error(
         "Activation conflict: command '{command}' is already provided by package '{existing_package}'"

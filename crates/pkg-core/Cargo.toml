@@ -25,6 +25,12 @@ goblin = { workspace = true }
 sha2 = { workspace = true }
 rusqlite = { workspace = true }
 libc = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+pgp = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

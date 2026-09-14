@@ -211,6 +211,35 @@ pub struct LifecycleScript {
     pub content: String,
 }
 
+/// A verified, installed package present in the local store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPackage {
+    pub name: String,
+    pub version: String,
+    pub architecture: String,
+    pub format: String,
+    pub digest: String,
+    pub store_id: String,
+    pub store_path: PathBuf,
+    pub installed_at: String, // ISO8601 string
+    pub active: bool,
+    pub profile: String,
+    pub binaries: Vec<String>,
+}
+
+/// A package available in a remote repository snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePackage {
+    pub repository_id: String,
+    pub name: String,
+    pub version: String,
+    pub architecture: String,
+    pub format: String,
+    pub digest: String,
+    pub size_bytes: u64,
+    pub url: String,
+}
+
 /// Metadata describing a single file entry in the package payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageEntry {
