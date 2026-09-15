@@ -326,6 +326,14 @@ components = []
 priority = 20
 
 [[repository]]
+id = "arch-core"
+format = "alpm"
+url = "https://geo.mirror.pkgbuild.com"
+distribution = "core"
+components = []
+priority = 30
+
+[[repository]]
 id = "arch-extra"
 format = "alpm"
 url = "https://geo.mirror.pkgbuild.com"
