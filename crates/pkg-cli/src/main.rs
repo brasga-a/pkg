@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use pkg_core::{Engine, PackageInfo, StoreLayout};
+use pkg_core::{Engine, PackageInfo, RemoteResolution, StoreLayout};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,9 +33,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Install a package from a local artifact (.deb)
+    /// Install a package from a local artifact (.deb, .rpm, .pkg.tar.zst) or remote catalog
     Install {
-        /// Path to the local package artifact
+        /// Path to the local package artifact or remote package target (e.g. name, repo/name, or name:format)
         path: PathBuf,
 
         /// Produce and display the install plan without modifying disk or state
@@ -63,6 +63,14 @@ enum Commands {
     Search {
         /// Package name to search for
         query: String,
+
+        /// Filter by package format (deb, rpm, alpm)
+        #[arg(long)]
+        format: Option<String>,
+
+        /// Filter by repository ID (e.g. fedora-41, arch-extra)
+        #[arg(long)]
+        repo: Option<String>,
     },
 
     /// Manage remote repositories
@@ -82,17 +90,20 @@ enum Commands {
 enum RepoCommands {
     /// Add a new remote repository
     Add {
-        /// Unique identifier for the repository (e.g., ubuntu-noble)
+        /// Unique identifier for the repository (e.g., ubuntu-noble, fedora-41, arch-extra)
         id: String,
         /// Repository format ecosystem (deb, rpm, alpm)
         #[arg(long, default_value = "deb")]
         format: String,
         /// Repository base URL (e.g., http://archive.ubuntu.com/ubuntu)
         url: String,
-        /// Distribution suite (e.g., noble)
+        /// Distribution suite (e.g., noble, 41, extra)
         distribution: String,
         /// Components to fetch (e.g., main universe)
         components: Vec<String>,
+        /// Repository priority (higher values preferred during resolution)
+        #[arg(long)]
+        priority: Option<u32>,
     },
     /// List configured repositories
     List,
@@ -137,26 +148,59 @@ async fn run() -> Result<()> {
                 path
             } else {
                 let name = path.to_string_lossy();
-                println!("Searching for remote package '{}'...", name);
-                let remote_pkg_opt = engine.get_remote_package(&name)?;
-
-                if let Some(remote_pkg) = remote_pkg_opt {
-                    println!(
-                        "Found {} {} in {}",
-                        remote_pkg.name, remote_pkg.version, remote_pkg.repository_id
-                    );
-                    if dry_run {
-                        println!("Would download {} from {}", remote_pkg.name, remote_pkg.url);
-                        return Ok(()); // Avoid downloading on dry-run
-                    }
-                    println!("Downloading {}...", remote_pkg.name);
-                    engine.download_remote(&remote_pkg).await?
+                println!("Resolving package target '{}'...", name);
+                let config_path = engine.layout().base_dir().join("repositories.toml");
+                let config = if config_path.exists() {
+                    pkg_core::repository::RepositoriesConfig::load_from_file(&config_path).ok()
                 } else {
-                    return Err(anyhow::anyhow!(
-                        "Package '{}' not found in local paths or remote repositories.",
-                        name
-                    ));
+                    None
+                };
+
+                let resolution = engine.resolve_remote_package(&name, config.as_ref())?;
+                let remote_pkg = match resolution {
+                    RemoteResolution::NotFound => {
+                        return Err(anyhow::anyhow!(
+                            "Package target '{}' not found in local paths or active repository snapshots.",
+                            name
+                        ));
+                    }
+                    RemoteResolution::Exact(pkg) => pkg,
+                    RemoteResolution::Ambiguous(candidates) => {
+                        eprintln!("\nMultiple candidates match '{}':", name);
+                        for (i, cand) in candidates.iter().enumerate() {
+                            eprintln!(
+                                "  {}) {} {} [{}] (from repository '{}')",
+                                i + 1,
+                                cand.name,
+                                cand.version,
+                                cand.format,
+                                cand.repository_id
+                            );
+                        }
+                        return Err(anyhow::anyhow!(
+                            "Ambiguous package target '{}'. Please qualify by repository (e.g. '{}/{}') or format (e.g. '{}:{}').",
+                            name,
+                            candidates[0].repository_id,
+                            candidates[0].name,
+                            candidates[0].name,
+                            candidates[0].format
+                        ));
+                    }
+                };
+
+                println!(
+                    "Found {} {} [{}] in {}",
+                    remote_pkg.name,
+                    remote_pkg.version,
+                    remote_pkg.format,
+                    remote_pkg.repository_id
+                );
+                if dry_run {
+                    println!("Would download {} from {}", remote_pkg.name, remote_pkg.url);
+                    return Ok(()); // Avoid downloading on dry-run
                 }
+                println!("Downloading {}...", remote_pkg.name);
+                engine.download_remote(&remote_pkg).await?
             };
 
             let plan = engine.install(&artifact_path, &cli.profile, dry_run)?;
@@ -259,15 +303,35 @@ async fn run() -> Result<()> {
                     r#"
 [[repository]]
 id = "ubuntu-noble"
+format = "deb"
 url = "http://archive.ubuntu.com/ubuntu"
 distribution = "noble"
 components = ["main", "universe", "restricted", "multiverse"]
+priority = 10
 
 [[repository]]
 id = "debian-bookworm"
+format = "deb"
 url = "http://deb.debian.org/debian"
 distribution = "bookworm"
 components = ["main", "contrib", "non-free"]
+priority = 10
+
+[[repository]]
+id = "fedora-41"
+format = "rpm"
+url = "https://download.fedoraproject.org/pub/fedora/linux/releases/41/Everything/x86_64/os"
+distribution = "41"
+components = []
+priority = 20
+
+[[repository]]
+id = "arch-extra"
+format = "alpm"
+url = "https://geo.mirror.pkgbuild.com"
+distribution = "extra"
+components = []
+priority = 30
 "#,
                 )?;
             }
@@ -291,14 +355,19 @@ components = ["main", "contrib", "non-free"]
                     let config =
                         pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?;
                     println!(
-                        "{:<20} {:<8} {:<35} {:<15} COMPONENTS",
-                        "ID", "FORMAT", "URL", "DISTRIBUTION"
+                        "{:<20} {:<8} {:<10} {:<35} {:<15} COMPONENTS",
+                        "ID", "FORMAT", "PRIORITY", "URL", "DISTRIBUTION"
                     );
                     for repo in config.repositories {
+                        let prio_str = repo
+                            .priority
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "-".to_string());
                         println!(
-                            "{:<20} {:<8} {:<35} {:<15} {}",
+                            "{:<20} {:<8} {:<10} {:<35} {:<15} {}",
                             repo.id,
                             repo.format,
+                            prio_str,
                             repo.url,
                             repo.distribution,
                             repo.components.join(", ")
@@ -311,6 +380,7 @@ components = ["main", "contrib", "non-free"]
                     url,
                     distribution,
                     components,
+                    priority,
                 } => {
                     let mut config = if config_path.exists() {
                         pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?
@@ -336,6 +406,7 @@ components = ["main", "contrib", "non-free"]
                             distribution,
                             components,
                             public_key_path: None,
+                            priority,
                         });
 
                     let toml_string = toml::to_string_pretty(&config)?;
@@ -345,8 +416,12 @@ components = ["main", "contrib", "non-free"]
                 }
             }
         }
-        Commands::Search { query } => {
-            let results = engine.search(&query)?;
+        Commands::Search {
+            query,
+            format,
+            repo,
+        } => {
+            let results = engine.search_filtered(&query, format.as_deref(), repo.as_deref())?;
             if results.is_empty() {
                 println!(
                     "No packages matching '{}' found in active snapshots.",
@@ -354,13 +429,18 @@ components = ["main", "contrib", "non-free"]
                 );
             } else {
                 println!(
-                    "{:<25} {:<20} {:<10} {:<25} SIZE",
-                    "NAME", "VERSION", "ARCH", "REPOSITORY"
+                    "{:<25} {:<20} {:<10} {:<8} {:<25} SIZE",
+                    "NAME", "VERSION", "ARCH", "FORMAT", "REPOSITORY"
                 );
                 for pkg in &results {
                     println!(
-                        "{:<25} {:<20} {:<10} {:<25} {} bytes",
-                        pkg.name, pkg.version, pkg.architecture, pkg.repository_id, pkg.size_bytes
+                        "{:<25} {:<20} {:<10} {:<8} {:<25} {} bytes",
+                        pkg.name,
+                        pkg.version,
+                        pkg.architecture,
+                        pkg.format,
+                        pkg.repository_id,
+                        pkg.size_bytes
                     );
                 }
                 println!("\nTotal: {} package(s) found.", results.len());

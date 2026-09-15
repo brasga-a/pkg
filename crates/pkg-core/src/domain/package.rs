@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::domain::capability::{Capability, Dependency};
 use crate::error::{Error, Result};
@@ -195,6 +195,22 @@ impl ArtifactDigest {
     /// Creates a SHA-256 digest from raw hex string.
     pub fn sha256(hex: impl Into<String>) -> Self {
         Self::new("sha256", hex)
+    }
+
+    /// Computes the SHA-256 digest of a file.
+    pub fn from_file(path: &Path) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok(Self::sha256(format!("{:x}", hasher.finalize())))
     }
 
     /// Returns the digest hex string.

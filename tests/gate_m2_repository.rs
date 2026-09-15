@@ -335,6 +335,7 @@ async fn tampered_indices_and_signatures_preserve_previous_snapshot() {
                 distribution: "testsuite".into(),
                 components: vec!["main".into()],
                 public_key_path: Some(key),
+                priority: None,
             }],
         };
         assert!(engine.update(&config).await.is_err());

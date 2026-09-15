@@ -60,12 +60,31 @@ Este documento resume a evolução do desenvolvimento do `pkg`, consolidando o q
   - `pkg repo list` e `pkg repo add`: Gerenciamento declarativo via CLI.
   - `pkg install <nome>`: Resolução automática de pacotes remotos, download para o cache e instalação na store.
 
+### Milestone 3: Expansão Cross-Distro e Resolvedor de Dependências (Concluído)
+- [x] **Adaptadores de Artefatos Multi-Ecossistema:**
+  - Suporte completo e sem dependências externas a pacotes **RPM** (`.rpm`): parser de Lead, Header de assinaturas e cabeçalho de tags; descompressão de payloads (gzip, zstd, xz) e extração de arquivos CPIO sob limites rígidos de segurança (`ExtractionLimits` - INV-004).
+  - Suporte completo a pacotes **Arch Linux / ALPM** (`.pkg.tar.zst`): descompressão zstd, parsing e normalização de metadados do `.PKGINFO` e inventariação segura de scripts `.INSTALL`.
+- [x] **Política Estrita de Segurança e Default-Deny (INV-003 & ADR-011):**
+  - Scriptlets de mantenedor RPM (`%pre`, `%post`, `%preun`, `%postun`) e ALPM (`pre_install`, `post_install`, etc.) são inventariados com segurança como metadados, mas **nunca executados** no host.
+- [x] **IR Normalizada de Restrições (ADR-009):**
+  - Modelagem unificada de dependências via `Constraint` (`AllOf`, `AnyOf`, `Package`, `Capability`, `Conflict`).
+  - Representação precisa de operadores de versão (`=`, `!=`, `<`, `<=`, `>`, `>=`).
+- [x] **Preservação de Semântica de Versões (INV-008):**
+  - Proibição absoluta de coerção para SemVer padrão.
+  - Comparadores nativos independentes: `DebianVersion` (com tildes `~` e epochs), `RpmVersion` (implementação de algoritmo idêntico ao `rpmvercmp` com carets `^` e tildes) e `AlpmVersion` (`alpm_vercmp`).
+- [x] **Resolvedor de Dependências Baseado em Capacidades e Evidências (ADR-016):**
+  - Rejeição estrita de falsa equivalência nominal entre distribuições (INV-007: pacotes com mesmo nome em distros diferentes não são equivalentes sem prova de capacidade).
+  - Verificação de evidências binárias de bibliotecas dinâmicas ELF (`DT_NEEDED` / SONAMEs - INV-009) contra os recursos fornecidos ou presentes no hospedeiro (`HostEvidence`).
+  - Geração de cadeias explicativas legíveis por humanos (`ExplanationChain` - INV-020) detalhando conflitos, dependências ausentes e inconsistências de ABI.
+- [x] **Gates de Validação Aprovados:**
+  - Gate M3 (Resolver, Multi-Format & Evidence Compatibility) 100% aprovado (`tests/gate_m3_resolver.rs`).
+
 ---
 
 ## 🔭 Próximos Passos (Roadmap Futuro)
 
 | Marco | Foco Principal |
 |---|---|
-| **Milestone 3 — Expansão Cross-Distro** | Adaptadores para formatos RPM (`.rpm`) e Arch Linux (`.pkg.tar.zst`), representação intermediária de restrições (IR) e resolvedor de dependências baseado em capacidades. |
-| **Milestone 4 — Integração Desktop** | Criação tipada e reversível de arquivos `.desktop`, ícones e associações MIME no espaço do usuário. |
+| **Expansão de Repositórios Remotos (RPM, Arch & AUR)** | Sincronização online de metadados RPM-MD (`repomd.xml` / `primary.xml.gz`), sincronização ALPM (`core.db` / `extra.db`) e integração com Arch User Repository (AUR) via RPC v5, pacotes `-bin` e builds herméticos. |
+| **Milestone 4 — Integração Desktop** | Criação tipada e reversível de arquivos `.desktop`, ícones e associações MIME no espaço do usuário sem scripts de mantenedor. |
 | **Milestone 5 — Hardening v1.0** | Gerações de perfis, rollback atômico de versões instaladas, coletor de lixo (Garbage Collector da Store) e ferramenta de diagnóstico `pkg doctor`. |

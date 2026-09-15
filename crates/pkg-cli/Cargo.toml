@@ -36,6 +36,7 @@ rusqlite = { workspace = true }
 rpm = { workspace = true }
 zstd = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [[test]]
 name = "cli_smoke"
@@ -64,3 +65,7 @@ path = "../../tests/gate_m3_resolver.rs"
 [[test]]
 name = "review_regressions"
 path = "../../tests/review_regressions.rs"
+
+[[test]]
+name = "gate_multi_repo"
+path = "../../tests/gate_multi_repo.rs"

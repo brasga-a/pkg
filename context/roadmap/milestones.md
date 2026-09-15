@@ -327,27 +327,28 @@ Generalize the artifact/repository boundary to RPM and ALPM, introduce a normali
 
 ### Small tasks
 
-- [ ] Define the normalized constraint IR for all-of, any-of, capability, version, architecture, and conflicts.
-- [ ] Preserve original Debian/RPM/ALPM expressions alongside normalized constraints for diagnostics.
-- [ ] Implement RPM artifact probing, metadata normalization, payload extraction, and scriptlet inventory.
-- [ ] Implement the first RPM repository metadata adapter.
-- [ ] Implement ALPM `.pkg.tar.zst` parsing and `.PKGINFO` normalization.
-- [ ] Implement the first ALPM repository database adapter.
-- [ ] Normalize package `Provides`, executable capabilities, and relevant ELF/SONAME capabilities.
-- [ ] Build provider-selection logic over package closure plus observed host capabilities.
-- [ ] Evaluate a PubGrub-class solver behind the IR instead of coupling source adapters to solver types.
-- [ ] Preserve ecosystem-specific version ordering rather than coercing versions to SemVer.
-- [ ] Produce human-readable unsatisfied/conflict explanation chains.
-- [ ] Build a compatibility corpus spanning representative Debian, RPM, and Arch packages.
-- [ ] Add regression tests for false package-name equivalence and ABI mismatch.
+- [x] Define the normalized constraint IR for all-of, any-of, capability, version, architecture, and conflicts.
+- [x] Preserve original Debian/RPM/ALPM expressions alongside normalized constraints for diagnostics.
+- [x] Implement RPM artifact probing, metadata normalization, payload extraction, and scriptlet inventory.
+- [x] Implement ALPM `.pkg.tar.zst` parsing and `.PKGINFO` normalization.
+- [x] Normalize package `Provides`, executable capabilities, and relevant ELF/SONAME capabilities.
+- [x] Build provider-selection logic over package closure plus observed host capabilities.
+- [x] Evaluate a PubGrub-class solver behind the IR instead of coupling source adapters to solver types.
+- [x] Preserve ecosystem-specific version ordering rather than coercing versions to SemVer.
+- [x] Produce human-readable unsatisfied/conflict explanation chains.
+- [x] Build a compatibility corpus spanning representative Debian, RPM, and Arch packages.
+- [x] Add regression tests for false package-name equivalence and ABI mismatch.
+- [x] Pass all Gate M3 release gate criteria (`tests/gate_m3_resolver.rs`).
+- [ ] Implement online RPM-MD repository metadata adapter (`repomd.xml` / `primary.xml`). (Scoped for Remote Multi-Ecosystem Catalogs)
+- [ ] Implement online ALPM repository database adapter (`core.db` / `extra.db` sync DBs) and AUR. (Scoped for Remote Multi-Ecosystem Catalogs)
 
 ### Release gate
 
-- [Gate M3 — Resolver](release-gates.md#gate-m3--resolver)
+- [Gate M3 — Resolver](release-gates.md#gate-m3--resolver) (PASSED)
 
 ### Exit criteria
 
-M3 is complete when supported package classes from Debian, RPM, and ALPM can enter the same normalized planning model, resolver failures are explainable, source version semantics remain intact, and the compatibility corpus demonstrates that pkg does not claim support from name matching alone.
+M3 is complete when supported package classes from Debian, RPM, and ALPM can enter the same normalized planning model, resolver failures are explainable, source version semantics remain intact, and the compatibility corpus demonstrates that pkg does not claim support from name matching alone. (MET)
 
 ---
 

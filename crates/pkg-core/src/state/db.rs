@@ -297,20 +297,59 @@ impl StateDatabase {
         }
     }
 
-    /// Searches for remote packages by name (substring matching) across active snapshots.
-    pub fn search_remote_packages(
+    /// Searches for remote packages matching a target specification.
+    ///
+    /// Supported target formats:
+    /// - `repository_id/name` (e.g. `fedora-41/curl`, `arch-extra/curl`)
+    /// - `name:format` (e.g. `curl:rpm`, `curl:alpm`, `curl:deb`)
+    /// - `name@version` (e.g. `curl@8.9.1-1.fc41`)
+    /// - `name` (exact package name match across all repositories)
+    pub fn find_remote_candidates(
         &self,
-        query: &str,
+        spec: &str,
     ) -> Result<Vec<crate::domain::package::RemotePackage>> {
-        let pattern = format!("%{}%", query);
-        let mut stmt = self.conn.prepare(
-            "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
-                 FROM remote_packages
-                 WHERE name LIKE ?1
-                 ORDER BY name ASC, version DESC",
-        )?;
+        let (query_sql, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) =
+            if let Some((repo, name)) = spec.split_once('/') {
+                (
+                "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
+                     FROM remote_packages
+                     WHERE name = ?1 AND repository_id = ?2
+                     ORDER BY version DESC"
+                    .to_string(),
+                vec![Box::new(name.to_string()), Box::new(repo.to_string())],
+            )
+            } else if let Some((name, format)) = spec.split_once(':') {
+                (
+                "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
+                     FROM remote_packages
+                     WHERE name = ?1 AND format = ?2
+                     ORDER BY version DESC"
+                    .to_string(),
+                vec![Box::new(name.to_string()), Box::new(format.to_string())],
+            )
+            } else if let Some((name, version)) = spec.split_once('@') {
+                (
+                "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
+                     FROM remote_packages
+                     WHERE name = ?1 AND version = ?2
+                     ORDER BY version DESC"
+                    .to_string(),
+                vec![Box::new(name.to_string()), Box::new(version.to_string())],
+            )
+            } else {
+                (
+                "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
+                     FROM remote_packages
+                     WHERE name = ?1
+                     ORDER BY version DESC"
+                    .to_string(),
+                vec![Box::new(spec.to_string())],
+            )
+            };
 
-        let rows = stmt.query_map(params![pattern], |row| {
+        let mut stmt = self.conn.prepare(&query_sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
             Ok(crate::domain::package::RemotePackage {
                 repository_id: row.get(0)?,
                 name: row.get(1)?,
@@ -328,6 +367,64 @@ impl StateDatabase {
             results.push(r?);
         }
         Ok(results)
+    }
+
+    /// Searches for remote packages by name (substring matching) with optional format or repo filters.
+    pub fn search_remote_packages_filtered(
+        &self,
+        query: &str,
+        format_filter: Option<&str>,
+        repo_filter: Option<&str>,
+    ) -> Result<Vec<crate::domain::package::RemotePackage>> {
+        let mut sql =
+            "SELECT repository_id, name, version, architecture, format, digest, size_bytes, url
+                       FROM remote_packages
+                       WHERE name LIKE ?1"
+                .to_string();
+
+        let pattern = format!("%{}%", query);
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(pattern)];
+
+        if let Some(fmt) = format_filter {
+            sql.push_str(&format!(" AND format = ?{}", params.len() + 1));
+            params.push(Box::new(fmt.to_string()));
+        }
+
+        if let Some(repo) = repo_filter {
+            sql.push_str(&format!(" AND repository_id = ?{}", params.len() + 1));
+            params.push(Box::new(repo.to_string()));
+        }
+
+        sql.push_str(" ORDER BY name ASC, version DESC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(crate::domain::package::RemotePackage {
+                repository_id: row.get(0)?,
+                name: row.get(1)?,
+                version: row.get(2)?,
+                architecture: row.get(3)?,
+                format: row.get(4)?,
+                digest: row.get(5)?,
+                size_bytes: row.get(6)?,
+                url: row.get(7)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    /// Searches for remote packages by name (substring matching) across active snapshots.
+    pub fn search_remote_packages(
+        &self,
+        query: &str,
+    ) -> Result<Vec<crate::domain::package::RemotePackage>> {
+        self.search_remote_packages_filtered(query, None, None)
     }
 
     /// Lists all transactions that did not complete normally.

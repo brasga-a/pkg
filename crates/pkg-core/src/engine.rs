@@ -7,17 +7,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::activation::Activator;
 use crate::domain::installed::InstalledPackage;
-use crate::domain::package::NormalizedPackage;
+use crate::domain::package::{ArtifactDigest, NormalizedPackage};
 use crate::domain::plan::{InstallPlan, RemovePlan};
 use crate::error::{Error, Result};
 use crate::format::ExtractionLimits;
-use crate::format::deb::DebAdapter;
 use crate::host::elf::inspect_elf;
 use crate::lock::ProcessLock;
 use crate::planner::Planner;
 use crate::state::StateDatabase;
 use crate::store::StoreLayout;
 use crate::transaction::Recovery;
+
+/// Result of resolving a package target specification against the remote catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteResolution {
+    /// Exactly one package was matched (either naturally or via priority resolution).
+    Exact(crate::domain::package::RemotePackage),
+    /// Multiple packages matched across different repositories or formats.
+    Ambiguous(Vec<crate::domain::package::RemotePackage>),
+    /// No matching packages were found.
+    NotFound,
+}
 
 /// Detailed information about a package, either from local artifact or installed state.
 #[derive(Debug, Clone)]
@@ -270,14 +280,43 @@ impl Engine {
             let repo = repo.clone();
             async move {
                 let key_path = repo.public_key_path.as_deref();
-                let packages = crate::repository::deb::update_debian_repository(
-                    &repo.url,
-                    &repo.distribution,
-                    &repo.components,
-                    key_path,
-                    &keyrings_dir,
-                )
-                .await?;
+                let mut packages = match repo.format.to_lowercase().as_str() {
+                    "rpm" => {
+                        crate::repository::rpm_md::update_rpm_repository(
+                            &repo.url,
+                            &repo.distribution,
+                            &repo.components,
+                            key_path,
+                            &keyrings_dir,
+                        )
+                        .await?
+                    }
+                    "alpm" => {
+                        crate::repository::alpm_sync::update_alpm_repository(
+                            &repo.url,
+                            &repo.distribution,
+                            &repo.components,
+                            key_path,
+                            &keyrings_dir,
+                        )
+                        .await?
+                    }
+                    _ => {
+                        crate::repository::deb::update_debian_repository(
+                            &repo.url,
+                            &repo.distribution,
+                            &repo.components,
+                            key_path,
+                            &keyrings_dir,
+                        )
+                        .await?
+                    }
+                };
+
+                for pkg in &mut packages {
+                    pkg.repository_id = repo.id.clone();
+                }
+
                 Ok::<
                     (
                         crate::repository::RepositoryConfig,
@@ -311,12 +350,88 @@ impl Engine {
         self.db.search_remote_packages(query)
     }
 
+    /// Searches for remote packages with optional format and repository filters.
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        format_filter: Option<&str>,
+        repo_filter: Option<&str>,
+    ) -> Result<Vec<crate::domain::package::RemotePackage>> {
+        self.db
+            .search_remote_packages_filtered(query, format_filter, repo_filter)
+    }
+
     /// Looks up a remote package by exact name in active snapshots.
     pub fn get_remote_package(
         &self,
         name: &str,
     ) -> Result<Option<crate::domain::package::RemotePackage>> {
         self.db.get_remote_package(name)
+    }
+
+    /// Resolves a remote package target specification against the catalog.
+    ///
+    /// Supports:
+    /// - `repository_id/name` (e.g. `fedora-41/curl`, `arch-extra/curl`)
+    /// - `name:format` (e.g. `curl:rpm`, `curl:alpm`, `curl:deb`)
+    /// - `name@version` (e.g. `curl@8.9.1-1.fc41`)
+    /// - `name` (exact name with repository priority tie-breaking)
+    pub fn resolve_remote_package(
+        &self,
+        spec: &str,
+        config: Option<&crate::repository::RepositoriesConfig>,
+    ) -> Result<RemoteResolution> {
+        let candidates = self.db.find_remote_candidates(spec)?;
+        if candidates.is_empty() {
+            return Ok(RemoteResolution::NotFound);
+        }
+        if candidates.len() == 1 {
+            return Ok(RemoteResolution::Exact(
+                candidates.into_iter().next().unwrap(),
+            ));
+        }
+
+        // Use configured repository priority to break ties if possible
+        if let Some(cfg) = config {
+            let priority_map: std::collections::HashMap<&str, u32> = cfg
+                .repositories
+                .iter()
+                .filter_map(|r| r.priority.map(|p| (r.id.as_str(), p)))
+                .collect();
+
+            let mut max_priority = None;
+            let mut best_candidates = Vec::new();
+
+            for cand in &candidates {
+                let p = priority_map
+                    .get(cand.repository_id.as_str())
+                    .copied()
+                    .unwrap_or(0);
+                match max_priority {
+                    None => {
+                        max_priority = Some(p);
+                        best_candidates.push(cand.clone());
+                    }
+                    Some(max_p) if p > max_p => {
+                        max_priority = Some(p);
+                        best_candidates.clear();
+                        best_candidates.push(cand.clone());
+                    }
+                    Some(max_p) if p == max_p => {
+                        best_candidates.push(cand.clone());
+                    }
+                    _ => {}
+                }
+            }
+
+            if best_candidates.len() == 1 {
+                return Ok(RemoteResolution::Exact(
+                    best_candidates.into_iter().next().unwrap(),
+                ));
+            }
+        }
+
+        Ok(RemoteResolution::Ambiguous(candidates))
     }
 
     /// Downloads a remote package to the digest-addressed artifact cache.
@@ -337,7 +452,7 @@ impl Engine {
                     "Invalid artifact cache entry".into(),
                 ));
             }
-            if DebAdapter::compute_digest(&dest)?
+            if ArtifactDigest::from_file(&dest)?
                 .hex()
                 .eq_ignore_ascii_case(&pkg.digest)
                 && metadata.len() == pkg.size_bytes
@@ -356,7 +471,7 @@ impl Engine {
         downloader
             .download_to_file(&pkg.url, temporary.path())
             .await?;
-        let hash = DebAdapter::compute_digest(temporary.path())?;
+        let hash = ArtifactDigest::from_file(temporary.path())?;
         if !hash.hex().eq_ignore_ascii_case(&pkg.digest)
             || fs::metadata(temporary.path())?.len() != pkg.size_bytes
         {

@@ -30,6 +30,10 @@ pub struct RepositoryConfig {
 
     /// Path to a GPG public key or keyring to verify InRelease
     pub public_key_path: Option<PathBuf>,
+
+    /// Optional repository priority for resolving ambiguous packages (higher = preferred).
+    #[serde(default)]
+    pub priority: Option<u32>,
 }
 
 fn default_repo_format() -> String {

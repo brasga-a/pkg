@@ -24,6 +24,17 @@ pub fn detect_format(path: &Path) -> Result<PackageFormat> {
         if n >= 7 && &magic[..7] == b"!<arch>" {
             return Ok(PackageFormat::Deb);
         }
+
+        // ALPM packages are compressed tar archives (commonly .pkg.tar.zst or .pkg.tar.xz)
+        // Zstandard magic: 0x28 0xB5 0x2F 0xFD
+        if n >= 4 && magic[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+            return Ok(PackageFormat::Alpm);
+        }
+
+        // XZ magic: 0xFD '7' 'z' 'X' 'Z' 0x00
+        if n >= 6 && &magic[..6] == b"\xfd7zXZ\x00" {
+            return Ok(PackageFormat::Alpm);
+        }
     }
 
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
