@@ -49,7 +49,7 @@ async fn test_contextual_dependency_resolution_priorities() {
         ],
     };
 
-    let fake_packages = vec![
+    let fake_packages = [
         RemotePackage {
             repository_id: "arch-core".into(),
             name: "libxml2".into(),
@@ -190,7 +190,7 @@ fn test_profile_library_activation_and_deactivation() {
     assert!(profile_lib.join("libvirt.so.0").is_symlink());
 
     // Extra search paths include profile_lib
-    let extra_paths = vec![profile_lib.clone()];
+    let extra_paths = [profile_lib.clone()];
     assert!(extra_paths.iter().any(|d| d.join("libvirt.so.0").exists()));
 
     // Deactivate libraries

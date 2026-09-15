@@ -222,6 +222,13 @@ impl Engine {
             }
         }
 
+        // Relocate FHS paths in text files (e.g. shell scripts, .desktop, .service)
+        crate::domain::relocation::relocate_extracted_text_files(
+            &staging_dir,
+            &plan.target_store_dir,
+            &report.extracted_files,
+        )?;
+
         // Adapt runtime environment and prepare launchers for scripts (e.g. Python PYTHONPATH/shebang normalization)
         crate::runtime::prepare_launchers(
             &staging_dir,

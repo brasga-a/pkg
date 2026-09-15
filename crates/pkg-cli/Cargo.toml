@@ -98,3 +98,7 @@ path = "../../tests/test_runtime_launcher.rs"
 [[test]]
 name = "test_interactive_install"
 path = "../../tests/test_interactive_install.rs"
+
+[[test]]
+name = "test_text_relocation"
+path = "../../tests/test_text_relocation.rs"
