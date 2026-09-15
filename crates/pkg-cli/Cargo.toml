@@ -86,3 +86,15 @@ path = "../../tests/test_cli_improvements.rs"
 [[test]]
 name = "test_dependency_contextual_resolution"
 path = "../../tests/test_dependency_contextual_resolution.rs"
+
+[[test]]
+name = "test_rpm_noarch"
+path = "../../tests/test_rpm_noarch.rs"
+
+[[test]]
+name = "test_runtime_launcher"
+path = "../../tests/test_runtime_launcher.rs"
+
+[[test]]
+name = "test_interactive_install"
+path = "../../tests/test_interactive_install.rs"

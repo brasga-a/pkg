@@ -50,6 +50,10 @@ enum Commands {
         /// Bypass missing host shared libraries verification
         #[arg(long = "ignore-missing-libs")]
         ignore_missing_libs: bool,
+
+        /// Interactively select from matching package candidates
+        #[arg(short = 'i', long = "interactive")]
+        interactive: bool,
     },
 
     /// Remove an installed package from the active profile
@@ -157,6 +161,7 @@ async fn run() -> Result<()> {
             dry_run,
             yes,
             ignore_missing_libs,
+            interactive,
         } => {
             let config_path = engine.layout().base_dir().join("repositories.toml");
             let config = if config_path.exists() {
@@ -206,12 +211,30 @@ async fn run() -> Result<()> {
                     let spec = path.to_string_lossy().to_string();
                     println!("Resolving package target '{}'...", spec);
 
-                    let resolution = match engine.resolve_remote_package(&spec, config.as_ref()) {
-                        Ok(res) => res,
-                        Err(e) => {
-                            eprintln!("Error resolving package target '{}': {}", spec, e);
-                            failed_count += 1;
-                            continue;
+                    let resolution = if interactive && !spec.contains('/') {
+                        let candidates = match engine.db().find_remote_candidates(&spec) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!("Error resolving package target '{}': {}", spec, e);
+                                failed_count += 1;
+                                continue;
+                            }
+                        };
+                        if candidates.is_empty() {
+                            RemoteResolution::NotFound
+                        } else if candidates.len() == 1 {
+                            RemoteResolution::Exact(candidates.into_iter().next().unwrap())
+                        } else {
+                            RemoteResolution::Ambiguous(candidates)
+                        }
+                    } else {
+                        match engine.resolve_remote_package(&spec, config.as_ref()) {
+                            Ok(res) => res,
+                            Err(e) => {
+                                eprintln!("Error resolving package target '{}': {}", spec, e);
+                                failed_count += 1;
+                                continue;
+                            }
                         }
                     };
 

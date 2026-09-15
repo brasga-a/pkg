@@ -117,7 +117,7 @@ impl Architecture {
     pub fn parse(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "amd64" | "x86_64" | "x86-64" => Self::X86_64,
-            "all" => Self::All,
+            "all" | "noarch" => Self::All,
             "any" => Self::Any,
             other => Self::Other(other.to_string()),
         }
@@ -320,4 +320,23 @@ pub struct NormalizedPackage {
     pub entries: Vec<PackageEntry>,
     /// Installed uncompressed size estimate in bytes.
     pub installed_size: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_architecture_noarch_matches_x86_64_host() {
+        let package = Architecture::parse("noarch");
+        assert_eq!(package, Architecture::All);
+        let host = Architecture::X86_64;
+        assert!(package.matches_host(&host));
+
+        assert!(Architecture::parse("all").matches_host(&host));
+        assert!(Architecture::parse("any").matches_host(&host));
+        assert!(Architecture::parse("x86_64").matches_host(&host));
+        assert!(Architecture::parse("amd64").matches_host(&host));
+        assert!(!Architecture::parse("aarch64").matches_host(&host));
+    }
 }

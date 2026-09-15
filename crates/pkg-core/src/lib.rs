@@ -10,6 +10,7 @@ pub mod lock;
 pub mod planner;
 pub mod repository;
 pub mod resolver;
+pub mod runtime;
 pub mod state;
 pub mod store;
 pub mod transaction;

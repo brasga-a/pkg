@@ -356,8 +356,10 @@ async fn test_target_resolution_and_disambiguation() {
         other => panic!("Expected Exact match, got {other:?}"),
     }
 
-    // 4. Unqualified without priority -> Ambiguous (3 candidates)
-    let res = engine.resolve_remote_package("curl", None).unwrap();
+    // 4. Unqualified without priority and without host bias -> Ambiguous (3 candidates)
+    let res = engine
+        .resolve_remote_package_with_host("curl", None, None)
+        .unwrap();
     match res {
         RemoteResolution::Ambiguous(cands) => {
             assert_eq!(cands.len(), 3);
@@ -365,7 +367,7 @@ async fn test_target_resolution_and_disambiguation() {
         other => panic!("Expected Ambiguous resolution, got {other:?}"),
     }
 
-    // 5. Unqualified with priority -> Arch has highest priority (30)
+    // 5. Unqualified with priority and without host bias -> Arch has highest priority (30)
     let config = RepositoriesConfig {
         repositories: vec![
             RepositoryConfig {
@@ -399,7 +401,7 @@ async fn test_target_resolution_and_disambiguation() {
     };
 
     let res = engine
-        .resolve_remote_package("curl", Some(&config))
+        .resolve_remote_package_with_host("curl", Some(&config), None)
         .unwrap();
     match res {
         RemoteResolution::Exact(pkg) => {
@@ -409,7 +411,43 @@ async fn test_target_resolution_and_disambiguation() {
         other => panic!("Expected Exact resolution via priority, got {other:?}"),
     }
 
-    // 6. Unknown package -> NotFound
+    // 6. Unqualified with Ubuntu host -> Ubuntu wins over higher priority config (distro instalada)
+    let ubuntu_host = pkg_core::host::HostFacts {
+        os: "linux".to_string(),
+        architecture: pkg_core::domain::package::Architecture::X86_64,
+        distro_id: Some("ubuntu".to_string()),
+        distro_id_like: Some("debian".to_string()),
+    };
+    let res = engine
+        .resolve_remote_package_with_host("curl", Some(&config), Some(&ubuntu_host))
+        .unwrap();
+    match res {
+        RemoteResolution::Exact(pkg) => {
+            assert_eq!(pkg.repository_id, "ubuntu-noble");
+            assert_eq!(pkg.format, "deb");
+        }
+        other => panic!("Expected Ubuntu resolution via host distro, got {other:?}"),
+    }
+
+    // 7. Unqualified with Fedora host -> Fedora wins over higher priority config
+    let fedora_host = pkg_core::host::HostFacts {
+        os: "linux".to_string(),
+        architecture: pkg_core::domain::package::Architecture::X86_64,
+        distro_id: Some("fedora".to_string()),
+        distro_id_like: None,
+    };
+    let res = engine
+        .resolve_remote_package_with_host("curl", Some(&config), Some(&fedora_host))
+        .unwrap();
+    match res {
+        RemoteResolution::Exact(pkg) => {
+            assert_eq!(pkg.repository_id, "fedora-41");
+            assert_eq!(pkg.format, "rpm");
+        }
+        other => panic!("Expected Fedora resolution via host distro, got {other:?}"),
+    }
+
+    // 8. Unknown package -> NotFound
     let res = engine.resolve_remote_package("nonexistent", None).unwrap();
     assert_eq!(res, RemoteResolution::NotFound);
 }

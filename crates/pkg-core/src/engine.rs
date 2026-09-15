@@ -188,7 +188,7 @@ impl Engine {
 
         let format = crate::format::detect_format(artifact_path)?;
         let adapter = crate::format::get_adapter(format);
-        let report =
+        let mut report =
             adapter.extract_payload(artifact_path, &staging_dir, &ExtractionLimits::default())?;
 
         // 3. Transaction Prepared (verify ELF binaries and host libraries)
@@ -221,6 +221,13 @@ impl Engine {
                 }
             }
         }
+
+        // Adapt runtime environment and prepare launchers for scripts (e.g. Python PYTHONPATH/shebang normalization)
+        crate::runtime::prepare_launchers(
+            &staging_dir,
+            &mut plan.binaries,
+            &mut report.extracted_files,
+        )?;
 
         // 4. Transaction Promoting (atomic rename staging -> store)
         self.db.update_transaction_phase(&tx_id, "Promoting")?;
@@ -482,7 +489,18 @@ impl Engine {
         spec: &str,
         config: Option<&crate::repository::RepositoriesConfig>,
     ) -> Result<RemoteResolution> {
-        let candidates = self.db.find_remote_candidates(spec)?;
+        let host = crate::host::HostFacts::detect();
+        self.resolve_remote_package_with_host(spec, config, Some(&host))
+    }
+
+    /// Resolves a remote package target specification against the catalog with optional host facts.
+    pub fn resolve_remote_package_with_host(
+        &self,
+        spec: &str,
+        config: Option<&crate::repository::RepositoriesConfig>,
+        host: Option<&crate::host::HostFacts>,
+    ) -> Result<RemoteResolution> {
+        let mut candidates = self.db.find_remote_candidates(spec)?;
         if candidates.is_empty() {
             return Ok(RemoteResolution::NotFound);
         }
@@ -492,7 +510,42 @@ impl Engine {
             ));
         }
 
-        // Use configured repository priority to break ties if possible
+        // Priority 1: Match host distribution if target was not explicitly qualified with repository ('/')
+        if !spec.contains('/') {
+            if let Some(h) = host {
+                if let Some(ref distro) = h.distro_id {
+                    let host_matches: Vec<_> = candidates
+                        .iter()
+                        .filter(|c| c.repository_id.to_lowercase().contains(distro))
+                        .cloned()
+                        .collect();
+                    if host_matches.len() == 1 {
+                        return Ok(RemoteResolution::Exact(
+                            host_matches.into_iter().next().unwrap(),
+                        ));
+                    }
+                    if !host_matches.is_empty() {
+                        candidates = host_matches;
+                    } else if let Some(ref id_like) = h.distro_id_like {
+                        let like_matches: Vec<_> = candidates
+                            .iter()
+                            .filter(|c| c.repository_id.to_lowercase().contains(id_like))
+                            .cloned()
+                            .collect();
+                        if like_matches.len() == 1 {
+                            return Ok(RemoteResolution::Exact(
+                                like_matches.into_iter().next().unwrap(),
+                            ));
+                        }
+                        if !like_matches.is_empty() {
+                            candidates = like_matches;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Priority 2: Use configured repository priority to break ties if possible
         if let Some(cfg) = config {
             let priority_map: std::collections::HashMap<&str, u32> = cfg
                 .repositories
@@ -529,6 +582,42 @@ impl Engine {
                 return Ok(RemoteResolution::Exact(
                     best_candidates.into_iter().next().unwrap(),
                 ));
+            }
+            if !best_candidates.is_empty() {
+                candidates = best_candidates;
+            }
+        }
+
+        // Priority 3: Compare versions if all candidates have the same name and format
+        if candidates.len() > 1 {
+            let first_fmt = candidates[0].format.clone();
+            let first_name = candidates[0].name.clone();
+            let all_same = candidates
+                .iter()
+                .all(|c| c.format == first_fmt && c.name == first_name);
+            if all_same {
+                let ecosystem = match first_fmt.as_str() {
+                    "deb" => Some(crate::domain::version::VersionEcosystem::Debian),
+                    "rpm" => Some(crate::domain::version::VersionEcosystem::Rpm),
+                    "alpm" => Some(crate::domain::version::VersionEcosystem::Alpm),
+                    _ => None,
+                };
+                if let Some(eco) = ecosystem {
+                    candidates.sort_by(|a, b| {
+                        crate::domain::version::compare_versions(&b.version, &a.version, eco)
+                    });
+                    if candidates.len() == 1
+                        || crate::domain::version::compare_versions(
+                            &candidates[0].version,
+                            &candidates[1].version,
+                            eco,
+                        ) == std::cmp::Ordering::Greater
+                    {
+                        return Ok(RemoteResolution::Exact(
+                            candidates.into_iter().next().unwrap(),
+                        ));
+                    }
+                }
             }
         }
 
