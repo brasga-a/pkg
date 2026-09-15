@@ -39,3 +39,7 @@ INV-018 — unsupported host integration fails closed.
 INV-019 — system-critical packages are rejected in default policy.
 
 INV-020 — dependency solving errors include an explanation chain suitable for users and tests.
+
+INV-021 — non-interactive CLI and automated agent invocations must never block indefinitely without a TTY; unresolved choices fail fast with machine-parseable diagnostics.
+
+INV-022 — structured output schemas (`--json`) and native MCP tool interfaces are public API contracts subject to semantic versioning.

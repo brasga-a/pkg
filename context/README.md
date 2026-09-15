@@ -35,6 +35,7 @@ When documents disagree, use this precedence:
 - Repository behavior: `design/repository-model.md`, `design/repository-sync.md`.
 - CLI command contracts: `commands/README.md` and individual command documents in `commands/`.
 - Security: `design/integrity-and-signatures.md`, `design/security.md`, `research/security-analysis.md`.
+- Agent-first architecture: `design/agent-first-architecture.md`, `adr/ADR-019-agent-first-architecture-and-mcp-integration.md`.
 - Delivery plan: `roadmap/mvp.md`, `roadmap/milestones.md`, `roadmap/release-gates.md`.
 
 ## Canonical versus analysis documents

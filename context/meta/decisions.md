@@ -24,6 +24,7 @@
 | DEC-020 | Deferred | Native host dependency provider | — | M3+ |
 | DEC-021 | Open | Pkg-native repository signing format | — | M5 |
 | DEC-022 | Open | Content-addressed store versus artifact-derived store IDs | — | M5 |
+| DEC-023 | Accepted | Agent-first architecture and native MCP server | ADR-019 | M4-M5 |
 
 ## Rule
 

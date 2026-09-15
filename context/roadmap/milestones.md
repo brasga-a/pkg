@@ -424,6 +424,7 @@ Accepted foundations:
 - **DEC-012** — durable staged transactions.
 - **DEC-013** — digest-addressed artifact cache.
 - **DEC-015** — stable CLI contract, unstable internal API.
+- **DEC-023** — agent-first architecture and native MCP server.
 
 Open decisions that must be resolved before their dependent v1 work is considered final:
 
@@ -442,6 +443,8 @@ Open decisions that must be resolved before their dependent v1 work is considere
 - **INV-016** — freshness and authenticity remain distinct.
 - **INV-017** — cache remains identity/digest based.
 - **INV-020** — resolution failures stay explainable.
+- **INV-021** — non-interactive CLI and automated invocations never block on stdin without a TTY.
+- **INV-022** — structured output schemas (--json) and native MCP tools are public API contracts.
 
 ### Governing ADRs
 
@@ -452,6 +455,7 @@ Open decisions that must be resolved before their dependent v1 work is considere
 - [ADR-012 — durable staged transactions](../adr/ADR-012-durable-staged-transactions.md)
 - [ADR-013 — digest-addressed artifact cache](../adr/ADR-013-digest-addressed-artifact-cache.md)
 - [ADR-015 — CLI contract](../adr/ADR-015-cli-contract.md)
+- [ADR-019 — agent-first architecture and native MCP integration](../adr/ADR-019-agent-first-architecture-and-mcp-integration.md)
 
 New ADRs are required before closing any work that resolves **DEC-021** or **DEC-022**.
 
@@ -466,6 +470,10 @@ New ADRs are required before closing any work that resolves **DEC-021** or **DEC
 - [ ] Garbage-collect only provably unreachable pkg-owned content.
 - [ ] Implement `pkg doctor` checks for DB/store/profile/transaction consistency.
 - [ ] Add conservative repair paths for known pkg-owned inconsistent state.
+- [ ] Implement stable `--json` output contract across all CLI commands.
+- [ ] Implement fail-safe non-interactive mode and semantic exit codes for autonomous agents.
+- [ ] Implement ephemeral task profile management (`create`/`drop`) for agent workspace sandboxing.
+- [ ] Implement native Model Context Protocol (MCP) server subcommand (`pkg mcp`).
 - [ ] Resolve DEC-021 with an ADR before declaring a pkg-native signing format stable.
 - [ ] Resolve DEC-022 with an ADR before declaring final store identity semantics stable.
 - [ ] Add archive/parser/metadata fuzz targets and a hostile corpus.

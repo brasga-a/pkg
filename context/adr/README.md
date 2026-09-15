@@ -22,5 +22,6 @@ All ADRs below are **Accepted** for the current proposal.
 | [ADR-016](ADR-016-capability-based-cross-distro-compatibility.md) | Capability-based cross-distro compatibility. |
 | [ADR-017](ADR-017-format-support-order.md) | Format support order. |
 | [ADR-018](ADR-018-explicit-host-integration.md) | Explicit host integration. |
+| [ADR-019](ADR-019-agent-first-architecture-and-mcp-integration.md) | Agent-first architecture and native MCP integration. |
 
 `meta/decisions.md` is the topic/status/milestone ledger. If it disagrees with an ADR, resolve the documentation defect before implementation.
