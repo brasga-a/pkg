@@ -35,6 +35,9 @@ pub struct InstallPlan {
     pub ignored_scripts: Vec<String>,
     /// Host libraries checked and verified present for ELF binaries.
     pub host_libraries_verified: Vec<String>,
+    /// Missing host libraries permitted by user override (--ignore-missing-libs).
+    #[serde(default)]
+    pub missing_libraries: Vec<String>,
     /// Whether this is a dry-run execution.
     pub is_dry_run: bool,
 }

@@ -96,6 +96,7 @@ impl Planner {
             binaries,
             ignored_scripts,
             host_libraries_verified: Vec::new(),
+            missing_libraries: Vec::new(),
             is_dry_run,
         })
     }

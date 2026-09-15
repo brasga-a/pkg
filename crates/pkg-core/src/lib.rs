@@ -15,7 +15,7 @@ pub mod store;
 pub mod transaction;
 pub mod transport;
 
-pub use engine::{Engine, PackageInfo, RemoteResolution};
+pub use engine::{Engine, InstallOptions, PackageInfo, PreflightReport, RemoteResolution};
 pub use error::{Error, Result};
 pub use resolver::{ResolutionError, ResolutionPlan, Resolver};
 pub use store::StoreLayout;

@@ -53,6 +53,21 @@ impl BoundedDownloader {
     /// exceeding `max_bytes`, or if the streamed body exceeds `max_bytes`, the download
     /// is aborted with an error.
     pub async fn download_to_file(&self, url: &str, destination: &Path) -> Result<()> {
+        self.download_to_file_with_progress(url, destination, |_, _| {})
+            .await
+    }
+
+    /// Downloads the resource at `url` to the specified `destination` file, invoking
+    /// `on_progress` with `(downloaded_bytes, total_bytes)` as chunks arrive.
+    pub async fn download_to_file_with_progress<F>(
+        &self,
+        url: &str,
+        destination: &Path,
+        mut on_progress: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u64, Option<u64>) + Send + Sync,
+    {
         let response = self
             .client
             .get(url)
@@ -64,8 +79,10 @@ impl BoundedDownloader {
             .error_for_status()
             .map_err(|e| Error::Network(format!("HTTP error downloading {url}: {e}")))?;
 
+        let total_size = response.content_length();
+
         // Pre-flight check on advertised size
-        if let Some(content_length) = response.content_length() {
+        if let Some(content_length) = total_size {
             if content_length > self.limits.max_bytes {
                 return Err(Error::LimitsExceeded(format!(
                     "Advertised download size ({} bytes) exceeds limit ({} bytes) for {}",
@@ -96,6 +113,8 @@ impl BoundedDownloader {
         let mut downloaded_bytes = 0u64;
         let mut stream = response.bytes_stream();
 
+        on_progress(0, total_size);
+
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result
                 .map_err(|e| Error::Network(format!("Error reading chunk from {url}: {e}")))?;
@@ -118,6 +137,8 @@ impl BoundedDownloader {
                     e
                 )))
             })?;
+
+            on_progress(downloaded_bytes, total_size);
         }
 
         file.flush().await.map_err(|e| {

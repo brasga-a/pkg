@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use pkg_core::{Engine, PackageInfo, RemoteResolution, StoreLayout};
+use pkg_core::{Engine, InstallOptions, PackageInfo, RemoteResolution, StoreLayout};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -42,6 +42,14 @@ enum Commands {
         /// Produce and display the install plan without modifying disk or state
         #[arg(long)]
         dry_run: bool,
+
+        /// Automatically answer yes to all confirmation prompts
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+
+        /// Bypass missing host shared libraries verification
+        #[arg(long = "ignore-missing-libs")]
+        ignore_missing_libs: bool,
     },
 
     /// Remove an installed package from the active profile
@@ -144,7 +152,12 @@ async fn run() -> Result<()> {
     let engine = Engine::open(layout)?;
 
     match command {
-        Commands::Install { targets, dry_run } => {
+        Commands::Install {
+            targets,
+            dry_run,
+            yes,
+            ignore_missing_libs,
+        } => {
             let config_path = engine.layout().base_dir().join("repositories.toml");
             let config = if config_path.exists() {
                 pkg_core::repository::RepositoriesConfig::load_from_file(&config_path).ok()
@@ -152,24 +165,68 @@ async fn run() -> Result<()> {
                 None
             };
 
-            for path in targets {
-                let artifact_path = if path.exists() {
-                    path
-                } else {
-                    let name = path.to_string_lossy();
-                    println!("Resolving package target '{}'...", name);
+            let mut queue: Vec<TargetItem> = Vec::new();
+            let mut skipped_count = 0;
+            let mut failed_count = 0;
+            let mut installed_count = 0;
 
-                    let resolution = engine.resolve_remote_package(&name, config.as_ref())?;
+            // Phase 1: Planning / Resolution Queue
+            for path in &targets {
+                let (target_item, pkg_name) = if path.exists() {
+                    let format = match pkg_core::format::detect_format(path) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("Error detecting format of '{}': {}", path.display(), e);
+                            failed_count += 1;
+                            continue;
+                        }
+                    };
+                    let adapter = pkg_core::format::get_adapter(format);
+                    let meta = match adapter.parse_metadata(path) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eprintln!("Error reading metadata from '{}': {}", path.display(), e);
+                            failed_count += 1;
+                            continue;
+                        }
+                    };
+                    let name = meta.name.to_string();
+                    let version = meta.version.to_string();
+                    let format_str = meta.format.to_string();
+                    (
+                        TargetItem::Local {
+                            path: path.clone(),
+                            name: name.clone(),
+                            version,
+                            format: format_str,
+                        },
+                        name,
+                    )
+                } else {
+                    let spec = path.to_string_lossy().to_string();
+                    println!("Resolving package target '{}'...", spec);
+
+                    let resolution = match engine.resolve_remote_package(&spec, config.as_ref()) {
+                        Ok(res) => res,
+                        Err(e) => {
+                            eprintln!("Error resolving package target '{}': {}", spec, e);
+                            failed_count += 1;
+                            continue;
+                        }
+                    };
+
                     let remote_pkg = match resolution {
                         RemoteResolution::NotFound => {
-                            return Err(anyhow::anyhow!(
-                                "Package target '{}' not found in local paths or active repository snapshots.",
-                                name
-                            ));
+                            eprintln!(
+                                "Error: Package target '{}' not found in local paths or active repository snapshots.",
+                                spec
+                            );
+                            failed_count += 1;
+                            continue;
                         }
                         RemoteResolution::Exact(pkg) => pkg,
                         RemoteResolution::Ambiguous(candidates) => {
-                            println!("\nMultiple candidates match '{}':", name);
+                            println!("\nMultiple candidates match '{}':", spec);
                             for (i, cand) in candidates.iter().enumerate() {
                                 println!(
                                     "  {}) {} {} [{}] (from repository '{}')",
@@ -185,106 +242,316 @@ async fn run() -> Result<()> {
                             if std::io::stdin().is_terminal() {
                                 use std::io::Write;
                                 print!(
-                                    "\nSelect candidate to install [1-{}] (or Enter to cancel): ",
+                                    "\nSelect candidate to install [1-{}] (or Enter / 's' to skip): ",
                                     candidates.len()
                                 );
                                 std::io::stdout().flush().ok();
                                 let mut input = String::new();
                                 std::io::stdin().read_line(&mut input)?;
                                 let trimmed = input.trim();
-                                if trimmed.is_empty() {
-                                    println!("Installation cancelled.");
-                                    return Ok(());
+                                if trimmed.is_empty()
+                                    || trimmed.eq_ignore_ascii_case("s")
+                                    || trimmed.eq_ignore_ascii_case("cancel")
+                                {
+                                    println!("Skipping '{}'.", spec);
+                                    skipped_count += 1;
+                                    continue;
                                 }
                                 match trimmed.parse::<usize>() {
                                     Ok(num) if num >= 1 && num <= candidates.len() => {
                                         candidates[num - 1].clone()
                                     }
                                     _ => {
-                                        return Err(anyhow::anyhow!(
-                                            "Invalid selection '{}'. Installation cancelled.",
-                                            trimmed
-                                        ));
+                                        eprintln!(
+                                            "Invalid selection '{}'. Skipping '{}'.",
+                                            trimmed, spec
+                                        );
+                                        skipped_count += 1;
+                                        continue;
                                     }
                                 }
                             } else {
-                                return Err(anyhow::anyhow!(
+                                eprintln!(
                                     "Ambiguous package target '{}'. Please qualify directly by repository (e.g. '{}/{}').",
-                                    name,
-                                    candidates[0].repository_id,
-                                    candidates[0].name
-                                ));
+                                    spec, candidates[0].repository_id, candidates[0].name
+                                );
+                                failed_count += 1;
+                                continue;
                             }
                         }
                     };
+                    let name = remote_pkg.name.clone();
+                    (TargetItem::Remote(remote_pkg), name)
+                };
 
-                    println!(
-                        "Found {} {} [{}] in {}",
-                        remote_pkg.name,
-                        remote_pkg.version,
-                        remote_pkg.format,
-                        remote_pkg.repository_id
-                    );
-                    if dry_run {
-                        println!("Would download {} from {}", remote_pkg.name, remote_pkg.url);
-                        let cache_path = engine.layout().artifact_cache_path(&remote_pkg.digest);
-                        if cache_path.exists() {
-                            cache_path
-                        } else {
-                            println!(
-                                "Dry-run: remote package {} verified from {}.",
-                                remote_pkg.name, remote_pkg.repository_id
-                            );
+                // Point 2: Check if package is already installed
+                let (item_ver, item_fmt) = match &target_item {
+                    TargetItem::Local {
+                        version, format, ..
+                    } => (version.as_str(), format.as_str()),
+                    TargetItem::Remote(r) => (r.version.as_str(), r.format.as_str()),
+                };
+
+                if let Ok(Some(existing)) = engine.get_installed_package(&cli.profile, &pkg_name) {
+                    let existing_fmt = existing.format.to_string();
+                    let existing_ver = existing.version.as_str();
+
+                    if existing_fmt != item_fmt {
+                        let prompt = format!(
+                            "Package '{}' is already installed as [{}] ({}). Overwrite with [{}] ({})? [y/N]: ",
+                            pkg_name, existing_fmt, existing_ver, item_fmt, item_ver
+                        );
+                        if !prompt_confirm(&prompt, false, yes)? {
+                            println!("Skipping '{}'.", pkg_name);
+                            skipped_count += 1;
+                            continue;
+                        }
+                    } else if existing_ver == item_ver {
+                        let prompt = format!(
+                            "Package '{}' ({}, [{}]) is already installed in profile '{}'. Reinstall? [y/N]: ",
+                            pkg_name, existing_ver, existing_fmt, cli.profile
+                        );
+                        if !prompt_confirm(&prompt, false, yes)? {
+                            println!("Skipping '{}'.", pkg_name);
+                            skipped_count += 1;
                             continue;
                         }
                     } else {
-                        println!("Downloading {}...", remote_pkg.name);
-                        engine.download_remote(&remote_pkg).await?
-                    }
-                };
-
-                let plan = engine.install(&artifact_path, &cli.profile, dry_run)?;
-                if dry_run {
-                    println!("Install Plan (dry-run):");
-                    println!(
-                        "  Package:      {} {}",
-                        plan.package.name, plan.package.version
-                    );
-                    println!("  Architecture: {}", plan.package.architecture);
-                    println!("  Format:       {}", plan.package.format);
-                    println!("  Digest:       {}", plan.package.digest);
-                    println!("  Store target: {}", plan.target_store_dir.display());
-                    if !plan.binaries.is_empty() {
-                        println!("  Binaries to activate:");
-                        for bin in &plan.binaries {
-                            println!(
-                                "    - {} -> {}",
-                                bin.command,
-                                bin.profile_symlink_path.display()
-                            );
-                        }
-                    }
-                    if !plan.ignored_scripts.is_empty() {
-                        println!("  Ignored maintainer scripts (policy default-deny):");
-                        for script in &plan.ignored_scripts {
-                            println!("    - {script}");
-                        }
-                    }
-                } else {
-                    println!("Installed {} {}", plan.package.name, plan.package.version);
-                    if !plan.binaries.is_empty() {
-                        println!("Activated binaries in profile '{}':", cli.profile);
-                        for bin in &plan.binaries {
-                            println!("  - {}", bin.command);
-                        }
-                    }
-                    if !plan.ignored_scripts.is_empty() {
-                        println!("Ignored maintainer scripts:");
-                        for script in &plan.ignored_scripts {
-                            println!("  - {script} (default-deny)");
+                        let prompt = format!(
+                            "Package '{}' is already installed ({} [{}]). Replace with version {}? [Y/n]: ",
+                            pkg_name, existing_ver, existing_fmt, item_ver
+                        );
+                        if !prompt_confirm(&prompt, true, yes)? {
+                            println!("Skipping '{}'.", pkg_name);
+                            skipped_count += 1;
+                            continue;
                         }
                     }
                 }
+
+                queue.push(target_item);
+            }
+
+            // Phase 2: Execution Queue
+            for item in queue {
+                let (artifact_path, pkg_name) = match item {
+                    TargetItem::Local { path, name, .. } => (path, name),
+                    TargetItem::Remote(remote_pkg) => {
+                        let name = remote_pkg.name.clone();
+                        println!(
+                            "Found {} {} [{}] in {}",
+                            remote_pkg.name,
+                            remote_pkg.version,
+                            remote_pkg.format,
+                            remote_pkg.repository_id
+                        );
+                        if dry_run {
+                            println!("Would download {} from {}", remote_pkg.name, remote_pkg.url);
+                            let cache_path =
+                                engine.layout().artifact_cache_path(&remote_pkg.digest);
+                            if cache_path.exists() {
+                                (cache_path, name)
+                            } else {
+                                println!(
+                                    "Dry-run: remote package {} verified from {}.",
+                                    remote_pkg.name, remote_pkg.repository_id
+                                );
+                                installed_count += 1;
+                                continue;
+                            }
+                        } else {
+                            println!("Downloading {}...", remote_pkg.name);
+                            match download_with_progress(&engine, &remote_pkg).await {
+                                Ok(p) => (p, name),
+                                Err(e) => {
+                                    eprintln!("Error downloading '{}': {}", remote_pkg.name, e);
+                                    failed_count += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                };
+
+                let mut allow_missing = ignore_missing_libs;
+
+                // Point 3: Preflight inspection for missing shared libraries
+                if !dry_run {
+                    if let Ok(preflight) = engine.preflight_check(&artifact_path) {
+                        if !preflight.missing_libraries.is_empty() {
+                            println!(
+                                "\n⚠️  Package '{}' requires missing host libraries:\n  {}",
+                                preflight.package.name,
+                                preflight.missing_libraries.join(", ")
+                            );
+
+                            let mut detected_deps = Vec::new();
+                            for dep in &preflight.package.dependencies {
+                                let dep_name = dep.name.as_str();
+                                if preflight.missing_libraries.iter().any(|m| {
+                                    m.contains(dep_name)
+                                        || dep_name.contains(
+                                            m.trim_end_matches(".so")
+                                                .split('.')
+                                                .next()
+                                                .unwrap_or(""),
+                                        )
+                                }) {
+                                    if let Ok(RemoteResolution::Exact(p)) =
+                                        engine.resolve_remote_package(dep_name, config.as_ref())
+                                    {
+                                        if !detected_deps.iter().any(
+                                            |d: &pkg_core::domain::package::RemotePackage| {
+                                                d.name == p.name
+                                            },
+                                        ) {
+                                            detected_deps.push(p);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !detected_deps.is_empty() {
+                                println!("The following dependency packages can be installed:");
+                                for d in &detected_deps {
+                                    println!(
+                                        "  - {} {} [{}] (from {})",
+                                        d.name, d.version, d.format, d.repository_id
+                                    );
+                                }
+                                let install_deps = prompt_confirm(
+                                    "Install missing dependencies automatically? [Y/n]: ",
+                                    true,
+                                    yes,
+                                )?;
+                                if install_deps {
+                                    for d in detected_deps {
+                                        println!("Downloading dependency {}...", d.name);
+                                        match download_with_progress(&engine, &d).await {
+                                            Ok(dep_path) => {
+                                                let _ = engine.install_with_options(
+                                                    &dep_path,
+                                                    &cli.profile,
+                                                    false,
+                                                    InstallOptions {
+                                                        allow_missing_libraries: true,
+                                                    },
+                                                );
+                                                println!(
+                                                    "  ✓ Installed dependency {} {}",
+                                                    d.name, d.version
+                                                );
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "Failed to install dependency '{}': {}",
+                                                    d.name, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !allow_missing {
+                                let install_anyway = prompt_confirm(
+                                    "Install package anyway without dependencies? (Warning: the executable may fail at runtime) [y/N]: ",
+                                    false,
+                                    yes,
+                                )?;
+                                if install_anyway {
+                                    allow_missing = true;
+                                } else {
+                                    eprintln!(
+                                        "Skipping '{}' due to missing host libraries.",
+                                        preflight.package.name
+                                    );
+                                    failed_count += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let install_result = engine.install_with_options(
+                    &artifact_path,
+                    &cli.profile,
+                    dry_run,
+                    InstallOptions {
+                        allow_missing_libraries: allow_missing,
+                    },
+                );
+
+                match install_result {
+                    Ok(plan) => {
+                        if dry_run {
+                            println!("Install Plan (dry-run):");
+                            println!(
+                                "  Package:      {} {}",
+                                plan.package.name, plan.package.version
+                            );
+                            println!("  Architecture: {}", plan.package.architecture);
+                            println!("  Format:       {}", plan.package.format);
+                            println!("  Digest:       {}", plan.package.digest);
+                            println!("  Store target: {}", plan.target_store_dir.display());
+                            if !plan.binaries.is_empty() {
+                                println!("  Binaries to activate:");
+                                for bin in &plan.binaries {
+                                    println!(
+                                        "    - {} -> {}",
+                                        bin.command,
+                                        bin.profile_symlink_path.display()
+                                    );
+                                }
+                            }
+                            if !plan.ignored_scripts.is_empty() {
+                                println!("  Ignored maintainer scripts (policy default-deny):");
+                                for script in &plan.ignored_scripts {
+                                    println!("    - {script}");
+                                }
+                            }
+                        } else {
+                            println!("Installed {} {}", plan.package.name, plan.package.version);
+                            if !plan.missing_libraries.is_empty() {
+                                println!(
+                                    "  ⚠️  WARNING: Executable(s) installed with missing libraries: {}",
+                                    plan.missing_libraries.join(", ")
+                                );
+                            }
+                            if !plan.binaries.is_empty() {
+                                println!("Activated binaries in profile '{}':", cli.profile);
+                                for bin in &plan.binaries {
+                                    println!("  - {}", bin.command);
+                                }
+                            }
+                            if !plan.ignored_scripts.is_empty() {
+                                println!("Ignored maintainer scripts:");
+                                for script in &plan.ignored_scripts {
+                                    println!("  - {script} (default-deny)");
+                                }
+                            }
+                        }
+                        installed_count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("Error installing '{}': {}", pkg_name, e);
+                        failed_count += 1;
+                    }
+                }
+            }
+
+            if targets.len() > 1 {
+                println!(
+                    "\nSummary: {} installed, {} skipped, {} failed.",
+                    installed_count, skipped_count, failed_count
+                );
+            }
+
+            if failed_count > 0 && installed_count == 0 {
+                return Err(anyhow::anyhow!(
+                    "Installation failed for requested target(s)."
+                ));
             }
         }
         Commands::Remove { name, dry_run } => {
@@ -387,7 +654,20 @@ priority = 30
             println!("Reading config from {}...", config_path.display());
             let config = pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?;
             println!("Updating {} repositories...", config.repositories.len());
+
+            let spinner = indicatif::ProgressBar::new_spinner();
+            spinner.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                    .template("{spinner:.green} {msg}")
+                    .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
+            );
+            spinner.set_message("Synchronizing repository indexes and verifying signatures...");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
             let total = engine.update(&config).await?;
+            spinner.finish_and_clear();
+
             println!(
                 "Successfully updated snapshots. {} remote packages available.",
                 total
@@ -557,4 +837,83 @@ priority = 30
 #[tokio::main]
 async fn main() -> Result<()> {
     run().await
+}
+
+enum TargetItem {
+    Local {
+        path: PathBuf,
+        name: String,
+        version: String,
+        format: String,
+    },
+    Remote(pkg_core::domain::package::RemotePackage),
+}
+
+fn prompt_confirm(prompt: &str, default_yes: bool, assume_yes: bool) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+
+    if assume_yes {
+        return Ok(true);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Ok(default_yes);
+    }
+
+    print!("{}", prompt);
+    std::io::stdout().flush().ok();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim().to_lowercase();
+
+    if trimmed.is_empty() {
+        Ok(default_yes)
+    } else if trimmed == "y" || trimmed == "yes" {
+        Ok(true)
+    } else if trimmed == "n" || trimmed == "no" {
+        Ok(false)
+    } else {
+        Ok(default_yes)
+    }
+}
+
+async fn download_with_progress(
+    engine: &Engine,
+    remote_pkg: &pkg_core::domain::package::RemotePackage,
+) -> Result<PathBuf> {
+    use indicatif::{ProgressBar, ProgressStyle};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let pb = ProgressBar::new(remote_pkg.size_bytes);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta})")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("#>-"),
+    );
+
+    let pb_clone = pb.clone();
+    let was_cached = Arc::new(AtomicBool::new(true));
+    let was_cached_clone = Arc::clone(&was_cached);
+
+    let path = engine
+        .download_remote_with_progress(remote_pkg, move |downloaded, total| {
+            was_cached_clone.store(false, Ordering::Relaxed);
+            if let Some(total) = total {
+                pb_clone.set_length(total);
+            }
+            pb_clone.set_position(downloaded);
+        })
+        .await?;
+
+    if was_cached.load(Ordering::Relaxed) {
+        pb.finish_and_clear();
+        println!("  ✓ Using cached artifact: {}", remote_pkg.digest);
+    } else {
+        pb.finish_with_message("Download complete");
+    }
+
+    Ok(path)
 }

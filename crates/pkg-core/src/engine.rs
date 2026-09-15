@@ -38,6 +38,22 @@ pub enum PackageInfo {
     Installed(InstalledPackage),
 }
 
+/// Options for configuring package installation.
+#[derive(Debug, Clone, Default)]
+pub struct InstallOptions {
+    /// If true, missing shared libraries detected in ELF binaries will not abort installation.
+    pub allow_missing_libraries: bool,
+}
+
+/// Report returned by preflight inspection of an uninstalled package artifact.
+#[derive(Debug, Clone)]
+pub struct PreflightReport {
+    /// Parsed normalized metadata of the package.
+    pub package: NormalizedPackage,
+    /// Unresolved host dynamic shared libraries required by ELF executables.
+    pub missing_libraries: Vec<String>,
+}
+
 /// The core package engine.
 #[derive(Debug)]
 pub struct Engine {
@@ -78,12 +94,45 @@ impl Engine {
         Planner::plan_install(artifact_path, &self.layout, &self.db, profile, true)
     }
 
-    /// Installs a local package artifact into the store.
-    pub fn install(
+    /// Performs a preflight inspection on an artifact without mutating state or the store.
+    /// Returns the parsed package metadata and any missing ELF dynamic shared libraries.
+    pub fn preflight_check(&self, artifact_path: &Path) -> Result<PreflightReport> {
+        let format = crate::format::detect_format(artifact_path)?;
+        let adapter = crate::format::get_adapter(format);
+        let package = adapter.parse_metadata(artifact_path)?;
+
+        let temp_dir = tempfile::tempdir()?;
+        let report = adapter.extract_payload(
+            artifact_path,
+            temp_dir.path(),
+            &ExtractionLimits::default(),
+        )?;
+
+        let mut missing_libraries = Vec::new();
+        for file in &report.extracted_files {
+            let full_path = temp_dir.path().join(file);
+            if let Some(inspection) = inspect_elf(&full_path, Some(temp_dir.path()))? {
+                for lib in inspection.missing_libraries {
+                    if !missing_libraries.contains(&lib) {
+                        missing_libraries.push(lib);
+                    }
+                }
+            }
+        }
+
+        Ok(PreflightReport {
+            package,
+            missing_libraries,
+        })
+    }
+
+    /// Installs a local package artifact into the store with customized options.
+    pub fn install_with_options(
         &self,
         artifact_path: &Path,
         profile: &str,
         is_dry_run: bool,
+        options: InstallOptions,
     ) -> Result<InstallPlan> {
         if is_dry_run {
             return self.plan_install(artifact_path, profile);
@@ -135,11 +184,19 @@ impl Engine {
             let full_path = staging_dir.join(file);
             if let Some(inspection) = inspect_elf(&full_path, Some(&staging_dir))? {
                 if !inspection.missing_libraries.is_empty() {
-                    return Err(Error::IncompatibleHost(format!(
-                        "{} requires missing libraries: {}",
-                        file.display(),
-                        inspection.missing_libraries.join(", ")
-                    )));
+                    if !options.allow_missing_libraries {
+                        return Err(Error::IncompatibleHost(format!(
+                            "{} requires missing libraries: {}",
+                            file.display(),
+                            inspection.missing_libraries.join(", ")
+                        )));
+                    } else {
+                        for lib in &inspection.missing_libraries {
+                            if !plan.missing_libraries.contains(lib) {
+                                plan.missing_libraries.push(lib.clone());
+                            }
+                        }
+                    }
                 }
                 for lib in inspection.resolved_libraries {
                     if !plan.host_libraries_verified.contains(&lib) {
@@ -204,6 +261,21 @@ impl Engine {
         self.db.update_transaction_phase(&tx_id, "Completed")?;
 
         Ok(plan)
+    }
+
+    /// Installs a local package artifact into the store.
+    pub fn install(
+        &self,
+        artifact_path: &Path,
+        profile: &str,
+        is_dry_run: bool,
+    ) -> Result<InstallPlan> {
+        self.install_with_options(
+            artifact_path,
+            profile,
+            is_dry_run,
+            InstallOptions::default(),
+        )
     }
 
     /// Produces a removal plan without mutating disk or state database (INV-010).
@@ -439,6 +511,18 @@ impl Engine {
         &self,
         pkg: &crate::domain::package::RemotePackage,
     ) -> Result<std::path::PathBuf> {
+        self.download_remote_with_progress(pkg, |_, _| {}).await
+    }
+
+    /// Downloads a remote package to the digest-addressed artifact cache with progress reporting.
+    pub async fn download_remote_with_progress<F>(
+        &self,
+        pkg: &crate::domain::package::RemotePackage,
+        on_progress: F,
+    ) -> Result<std::path::PathBuf>
+    where
+        F: FnMut(u64, Option<u64>) + Send + Sync,
+    {
         if pkg.digest.len() != 64 || !pkg.digest.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::SecurityViolation(
                 "Invalid SHA256 digest in repository metadata".into(),
@@ -469,7 +553,7 @@ impl Engine {
         let temporary = tempfile::NamedTempFile::new_in(dest.parent().unwrap())?;
         let downloader = crate::transport::BoundedDownloader::try_default()?;
         downloader
-            .download_to_file(&pkg.url, temporary.path())
+            .download_to_file_with_progress(&pkg.url, temporary.path(), on_progress)
             .await?;
         let hash = ArtifactDigest::from_file(temporary.path())?;
         if !hash.hex().eq_ignore_ascii_case(&pkg.digest)
@@ -483,6 +567,15 @@ impl Engine {
         temporary.as_file().sync_all()?;
         temporary.persist(&dest).map_err(|e| Error::Io(e.error))?;
         Ok(dest)
+    }
+
+    /// Looks up an installed package by name in the specified profile.
+    pub fn get_installed_package(
+        &self,
+        profile: &str,
+        name: &str,
+    ) -> Result<Option<InstalledPackage>> {
+        self.db.get_package(profile, name)
     }
 
     /// Lists locally installed packages in the specified profile.
