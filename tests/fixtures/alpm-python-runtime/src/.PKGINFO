@@ -1,0 +1,6 @@
+pkgname = alpm-python-runtime-fixture
+pkgver = 1.0.0-1
+pkgdesc = Regression fixture for scoped Python runtime launchers
+arch = x86_64
+size = 10240
+depend = python

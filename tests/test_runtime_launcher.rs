@@ -1,37 +1,18 @@
-mod common;
-
-use common::AlpmPackageBuilder;
 use pkg_core::{Engine, InstallOptions, StoreLayout};
+use std::path::PathBuf;
 use std::process::Command;
 use tempfile::tempdir;
+
+fn fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/alpm-python-runtime/alpm-python-runtime-fixture-1.0.0-1-x86_64.pkg.tar.zst")
+}
 
 #[test]
 fn test_python_runtime_launcher_and_scoped_pythonpath() {
     let temp = tempdir().unwrap();
-    let pkg_path = temp.path().join("pytool-1.0.0-1-x86_64.pkg.tar.zst");
-
-    let script_content = r#"#!/usr/bin/python
-import sys
-import my_test_module
-
-print(f"MODULE_VAL={my_test_module.GREETING}")
-for arg in sys.argv[1:]:
-    print(f"ARG={arg}")
-"#;
-
-    let module_content = r#"GREETING = "RUNTIME_LAUNCHER_SUCCESS"
-"#;
-
-    AlpmPackageBuilder::new("pytool")
-        .version("1.0.0-1")
-        .file("usr/bin/pytool", script_content.as_bytes(), 0o755)
-        .file(
-            "usr/lib/python3.14/site-packages/my_test_module.py",
-            module_content.as_bytes(),
-            0o644,
-        )
-        .write_to(&pkg_path)
-        .unwrap();
+    let pkg_path = fixture_path();
+    assert!(pkg_path.is_file(), "missing ALPM Python runtime fixture: {}", pkg_path.display());
 
     let store_dir = temp.path().join("store");
     let engine = Engine::open(StoreLayout::new(store_dir)).unwrap();
@@ -47,30 +28,31 @@ for arg in sys.argv[1:]:
         )
         .unwrap();
 
-    assert_eq!(plan.package.name.as_str(), "pytool");
+    assert_eq!(plan.package.name.as_str(), "alpm-python-runtime-fixture");
     assert_eq!(plan.binaries.len(), 1);
-    assert_eq!(plan.binaries[0].command, "pytool");
+    assert_eq!(plan.binaries[0].command, "alpm-python-runtime-fixture");
     assert_eq!(
         plan.binaries[0].relative_store_path,
-        std::path::PathBuf::from(".pkg-launcher/pytool")
+        PathBuf::from(".pkg-launcher/alpm-python-runtime-fixture")
     );
 
-    // Profile symlink must point to the launcher
-    let profile_bin = engine.layout().profile_bin_dir("default").join("pytool");
+    let profile_bin = engine
+        .layout()
+        .profile_bin_dir("default")
+        .join("alpm-python-runtime-fixture");
     assert!(profile_bin.is_symlink());
 
-    // Execute through profile symlink with arguments
     let output = Command::new(&profile_bin)
         .arg("--arg1")
         .arg("val2")
         .output()
-        .expect("Failed to execute pytool via launcher");
+        .expect("failed to execute ALPM Python fixture via runtime launcher");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "Command failed with status: {:?}\nstderr: {}\nstdout: {}",
+        "command failed with status: {:?}\nstderr: {}\nstdout: {}",
         output.status,
         stderr,
         stdout
