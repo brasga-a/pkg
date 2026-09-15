@@ -80,4 +80,71 @@ impl Activator {
         }
         Ok(())
     }
+
+    /// Activates shared libraries from a store object into the profile lib directory.
+    pub fn activate_libraries(store_dir: &Path, profile_lib_dir: &Path) -> Result<()> {
+        if !store_dir.exists() {
+            return Ok(());
+        }
+        fs::create_dir_all(profile_lib_dir)?;
+
+        let mut lib_files = Vec::new();
+        let lib_subdirs = ["lib", "lib64", "usr/lib", "usr/lib64"];
+        for sub in &lib_subdirs {
+            let p = store_dir.join(sub);
+            if p.is_dir() {
+                collect_so_files(&p, &mut lib_files);
+            }
+        }
+
+        for file in lib_files {
+            if let Some(name) = file.file_name() {
+                let link_path = profile_lib_dir.join(name);
+                if link_path.is_symlink() {
+                    let _ = fs::remove_file(&link_path);
+                } else if link_path.exists() {
+                    // Unmanaged regular file or directory: preserve it
+                    continue;
+                }
+                let _ = std::os::unix::fs::symlink(&file, &link_path);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Deactivates shared library symlinks for a store object from the profile lib directory.
+    pub fn deactivate_libraries(store_dir: &Path, profile_lib_dir: &Path) -> Result<()> {
+        if !profile_lib_dir.exists() {
+            return Ok(());
+        }
+        if let Ok(entries) = fs::read_dir(profile_lib_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_symlink() {
+                    if let Ok(target) = fs::read_link(&path) {
+                        if target.starts_with(store_dir) {
+                            let _ = fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn collect_so_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && !path.is_symlink() {
+                collect_so_files(&path, files);
+            } else if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if file_name.contains(".so") && path.exists() {
+                    files.push(path);
+                }
+            }
+        }
+    }
 }

@@ -2,7 +2,7 @@
 //! state database, transactions, and binary activations.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::activation::Activator;
@@ -11,7 +11,7 @@ use crate::domain::package::{ArtifactDigest, NormalizedPackage};
 use crate::domain::plan::{InstallPlan, RemovePlan};
 use crate::error::{Error, Result};
 use crate::format::ExtractionLimits;
-use crate::host::elf::inspect_elf;
+use crate::host::elf::inspect_elf_with_extra_paths;
 use crate::lock::ProcessLock;
 use crate::planner::Planner;
 use crate::state::StateDatabase;
@@ -95,8 +95,17 @@ impl Engine {
     }
 
     /// Performs a preflight inspection on an artifact without mutating state or the store.
-    /// Returns the parsed package metadata and any missing ELF dynamic shared libraries.
+    /// Uses the default profile for library resolution.
     pub fn preflight_check(&self, artifact_path: &Path) -> Result<PreflightReport> {
+        self.preflight_check_with_profile(artifact_path, "default")
+    }
+
+    /// Performs a preflight inspection on an artifact for a specific profile.
+    pub fn preflight_check_with_profile(
+        &self,
+        artifact_path: &Path,
+        profile: &str,
+    ) -> Result<PreflightReport> {
         let format = crate::format::detect_format(artifact_path)?;
         let adapter = crate::format::get_adapter(format);
         let package = adapter.parse_metadata(artifact_path)?;
@@ -108,10 +117,13 @@ impl Engine {
             &ExtractionLimits::default(),
         )?;
 
+        let extra_lib_dirs = self.profile_lib_search_paths(profile)?;
         let mut missing_libraries = Vec::new();
         for file in &report.extracted_files {
             let full_path = temp_dir.path().join(file);
-            if let Some(inspection) = inspect_elf(&full_path, Some(temp_dir.path()))? {
+            if let Some(inspection) =
+                inspect_elf_with_extra_paths(&full_path, Some(temp_dir.path()), &extra_lib_dirs)?
+            {
                 for lib in inspection.missing_libraries {
                     if !missing_libraries.contains(&lib) {
                         missing_libraries.push(lib);
@@ -147,6 +159,7 @@ impl Engine {
         // Plan installation
         let mut plan =
             Planner::plan_install(artifact_path, &self.layout, &self.db, profile, false)?;
+        let old_pkg = self.db.get_package(profile, plan.package.name.as_str())?;
         let old_binaries = self
             .db
             .get_activated_binaries(profile, plan.package.name.as_str())?;
@@ -180,9 +193,12 @@ impl Engine {
 
         // 3. Transaction Prepared (verify ELF binaries and host libraries)
         self.db.update_transaction_phase(&tx_id, "Prepared")?;
+        let extra_lib_dirs = self.profile_lib_search_paths(profile)?;
         for file in &report.extracted_files {
             let full_path = staging_dir.join(file);
-            if let Some(inspection) = inspect_elf(&full_path, Some(&staging_dir))? {
+            if let Some(inspection) =
+                inspect_elf_with_extra_paths(&full_path, Some(&staging_dir), &extra_lib_dirs)?
+            {
                 if !inspection.missing_libraries.is_empty() {
                     if !options.allow_missing_libraries {
                         return Err(Error::IncompatibleHost(format!(
@@ -234,7 +250,19 @@ impl Engine {
             .collect::<Result<Vec<_>>>()?;
         let (stale_paths, stale_targets): (Vec<_>, Vec<_>) = stale.into_iter().unzip();
         Activator::deactivate(&stale_paths, &stale_targets)?;
+        if let Some(ref old) = old_pkg {
+            if old.store_path != plan.target_store_dir {
+                Activator::deactivate_libraries(
+                    &old.store_path,
+                    &self.layout.profile_lib_dir(profile),
+                )?;
+            }
+        }
         Activator::activate(&plan, &self.layout.profile_bin_dir(profile))?;
+        Activator::activate_libraries(
+            &plan.target_store_dir,
+            &self.layout.profile_lib_dir(profile),
+        )?;
 
         // 6. Transaction Committing (commit state DB records)
         self.db.update_transaction_phase(&tx_id, "Committing")?;
@@ -320,8 +348,9 @@ impl Engine {
             None,
         )?;
 
-        // Deactivate profile binary symlinks
+        // Deactivate profile binary symlinks and shared library symlinks
         Activator::deactivate(&plan.binaries_to_remove, &plan.expected_targets)?;
+        Activator::deactivate_libraries(&plan.store_path, &self.layout.profile_lib_dir(profile))?;
 
         // Remove from database
         self.db.remove_package_from_profile(profile, package_name)?;
@@ -506,6 +535,168 @@ impl Engine {
         Ok(RemoteResolution::Ambiguous(candidates))
     }
 
+    /// Resolves a dependency package target specification against the catalog with contextual preference.
+    ///
+    /// Contextual resolution prioritizes:
+    /// 1. Origin repository (`preferred_repo`, e.g. `ubuntu-noble`)
+    /// 2. Compatible format (`preferred_format`, e.g. `deb`)
+    /// 3. Repository priority from configuration
+    /// 4. Highest version
+    pub fn resolve_dependency_package(
+        &self,
+        spec: &str,
+        preferred_repo: Option<&str>,
+        preferred_format: Option<&str>,
+        config: Option<&crate::repository::RepositoriesConfig>,
+    ) -> Result<RemoteResolution> {
+        let mut candidates = self.db.find_remote_candidates(spec)?;
+        if candidates.is_empty() {
+            return Ok(RemoteResolution::NotFound);
+        }
+        if candidates.len() == 1 {
+            let cand = candidates.into_iter().next().unwrap();
+            if let Some(fmt) = preferred_format {
+                if cand.format != fmt {
+                    // Prevent cross-format pollution ("salada de frutas")
+                    return Ok(RemoteResolution::NotFound);
+                }
+            }
+            return Ok(RemoteResolution::Exact(cand));
+        }
+
+        // Priority 1: Match preferred repository (parent package origin)
+        if let Some(repo) = preferred_repo {
+            let repo_matches: Vec<_> = candidates
+                .iter()
+                .filter(|c| c.repository_id == repo)
+                .cloned()
+                .collect();
+            if repo_matches.len() == 1 {
+                return Ok(RemoteResolution::Exact(
+                    repo_matches.into_iter().next().unwrap(),
+                ));
+            }
+            if !repo_matches.is_empty() {
+                candidates = repo_matches;
+            }
+        }
+
+        // Priority 2: Filter by preferred format if provided to avoid cross-distro format mixing
+        if let Some(fmt) = preferred_format {
+            let format_matches: Vec<_> = candidates
+                .iter()
+                .filter(|c| c.format == fmt)
+                .cloned()
+                .collect();
+            if format_matches.is_empty() {
+                return Ok(RemoteResolution::NotFound);
+            }
+            if format_matches.len() == 1 {
+                return Ok(RemoteResolution::Exact(
+                    format_matches.into_iter().next().unwrap(),
+                ));
+            }
+            candidates = format_matches;
+        }
+
+        // Priority 3: Repository priority tie-breaking from configuration
+        if let Some(cfg) = config {
+            let priority_map: std::collections::HashMap<&str, u32> = cfg
+                .repositories
+                .iter()
+                .filter_map(|r| r.priority.map(|p| (r.id.as_str(), p)))
+                .collect();
+
+            let mut max_priority = None;
+            let mut best_candidates = Vec::new();
+
+            for cand in &candidates {
+                let p = priority_map
+                    .get(cand.repository_id.as_str())
+                    .copied()
+                    .unwrap_or(0);
+                match max_priority {
+                    None => {
+                        max_priority = Some(p);
+                        best_candidates.push(cand.clone());
+                    }
+                    Some(max_p) if p > max_p => {
+                        max_priority = Some(p);
+                        best_candidates.clear();
+                        best_candidates.push(cand.clone());
+                    }
+                    Some(max_p) if p == max_p => {
+                        best_candidates.push(cand.clone());
+                    }
+                    _ => {}
+                }
+            }
+
+            if best_candidates.len() == 1 {
+                return Ok(RemoteResolution::Exact(
+                    best_candidates.into_iter().next().unwrap(),
+                ));
+            }
+            if !best_candidates.is_empty() {
+                candidates = best_candidates;
+            }
+        }
+
+        // Priority 4: Compare versions if all candidates have the same name and format
+        if candidates.len() > 1 {
+            let first_fmt = candidates[0].format.clone();
+            let first_name = candidates[0].name.clone();
+            let all_same = candidates
+                .iter()
+                .all(|c| c.format == first_fmt && c.name == first_name);
+            if all_same {
+                let ecosystem = match first_fmt.as_str() {
+                    "deb" => Some(crate::domain::version::VersionEcosystem::Debian),
+                    "rpm" => Some(crate::domain::version::VersionEcosystem::Rpm),
+                    "alpm" => Some(crate::domain::version::VersionEcosystem::Alpm),
+                    _ => None,
+                };
+                if let Some(eco) = ecosystem {
+                    candidates.sort_by(|a, b| {
+                        crate::domain::version::compare_versions(&b.version, &a.version, eco)
+                    });
+                    if candidates.len() == 1
+                        || crate::domain::version::compare_versions(
+                            &candidates[0].version,
+                            &candidates[1].version,
+                            eco,
+                        ) == std::cmp::Ordering::Greater
+                    {
+                        return Ok(RemoteResolution::Exact(
+                            candidates.into_iter().next().unwrap(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(RemoteResolution::Ambiguous(candidates))
+    }
+
+    /// Returns search paths for shared libraries in the profile.
+    /// This includes `profile_lib_dir` and store object library directories of installed packages.
+    pub fn profile_lib_search_paths(&self, profile: &str) -> Result<Vec<PathBuf>> {
+        let mut dirs = Vec::new();
+        let profile_lib = self.layout.profile_lib_dir(profile);
+        if profile_lib.is_dir() {
+            dirs.push(profile_lib);
+        }
+
+        if let Ok(installed) = self.db.list_packages(profile) {
+            for pkg in installed {
+                if pkg.store_path.is_dir() {
+                    collect_lib_dirs(&pkg.store_path, &mut dirs);
+                }
+            }
+        }
+        Ok(dirs)
+    }
+
     /// Downloads a remote package to the digest-addressed artifact cache.
     pub async fn download_remote(
         &self,
@@ -595,6 +786,26 @@ impl Engine {
             Ok(PackageInfo::Installed(installed))
         } else {
             Err(Error::PackageNotFound(name_or_path.to_string()))
+        }
+    }
+}
+
+fn collect_lib_dirs(base: &Path, dirs: &mut Vec<PathBuf>) {
+    let candidates = ["lib", "lib64", "usr/lib", "usr/lib64"];
+    for cand in &candidates {
+        let p = base.join(cand);
+        if p.is_dir() {
+            if !dirs.contains(&p) {
+                dirs.push(p.clone());
+            }
+            if let Ok(entries) = std::fs::read_dir(&p) {
+                for entry in entries.flatten() {
+                    let sub = entry.path();
+                    if sub.is_dir() && !sub.is_symlink() && !dirs.contains(&sub) {
+                        dirs.push(sub);
+                    }
+                }
+            }
         }
     }
 }

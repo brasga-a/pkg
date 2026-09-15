@@ -82,3 +82,7 @@ path = "../../tests/test_download_progress.rs"
 [[test]]
 name = "test_cli_improvements"
 path = "../../tests/test_cli_improvements.rs"
+
+[[test]]
+name = "test_dependency_contextual_resolution"
+path = "../../tests/test_dependency_contextual_resolution.rs"

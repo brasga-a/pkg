@@ -334,6 +334,13 @@ async fn run() -> Result<()> {
 
             // Phase 2: Execution Queue
             for item in queue {
+                let (preferred_repo, preferred_format) = match &item {
+                    TargetItem::Local { format, .. } => (None, Some(format.clone())),
+                    TargetItem::Remote(p) => {
+                        (Some(p.repository_id.clone()), Some(p.format.clone()))
+                    }
+                };
+
                 let (artifact_path, pkg_name) = match item {
                     TargetItem::Local { path, name, .. } => (path, name),
                     TargetItem::Remote(remote_pkg) => {
@@ -377,7 +384,9 @@ async fn run() -> Result<()> {
 
                 // Point 3: Preflight inspection for missing shared libraries
                 if !dry_run {
-                    if let Ok(preflight) = engine.preflight_check(&artifact_path) {
+                    if let Ok(preflight) =
+                        engine.preflight_check_with_profile(&artifact_path, &cli.profile)
+                    {
                         if !preflight.missing_libraries.is_empty() {
                             println!(
                                 "\n⚠️  Package '{}' requires missing host libraries:\n  {}",
@@ -388,17 +397,18 @@ async fn run() -> Result<()> {
                             let mut detected_deps = Vec::new();
                             for dep in &preflight.package.dependencies {
                                 let dep_name = dep.name.as_str();
-                                if preflight.missing_libraries.iter().any(|m| {
-                                    m.contains(dep_name)
-                                        || dep_name.contains(
-                                            m.trim_end_matches(".so")
-                                                .split('.')
-                                                .next()
-                                                .unwrap_or(""),
+                                if preflight
+                                    .missing_libraries
+                                    .iter()
+                                    .any(|m| matches_missing_library(dep_name, m))
+                                {
+                                    if let Ok(RemoteResolution::Exact(p)) = engine
+                                        .resolve_dependency_package(
+                                            dep_name,
+                                            preferred_repo.as_deref(),
+                                            preferred_format.as_deref(),
+                                            config.as_ref(),
                                         )
-                                }) {
-                                    if let Ok(RemoteResolution::Exact(p)) =
-                                        engine.resolve_remote_package(dep_name, config.as_ref())
                                     {
                                         if !detected_deps.iter().any(
                                             |d: &pkg_core::domain::package::RemotePackage| {
@@ -425,9 +435,9 @@ async fn run() -> Result<()> {
                                     yes,
                                 )?;
                                 if install_deps {
-                                    for d in detected_deps {
+                                    for d in &detected_deps {
                                         println!("Downloading dependency {}...", d.name);
-                                        match download_with_progress(&engine, &d).await {
+                                        match download_with_progress(&engine, d).await {
                                             Ok(dep_path) => {
                                                 let _ = engine.install_with_options(
                                                     &dep_path,
@@ -453,9 +463,24 @@ async fn run() -> Result<()> {
                                 }
                             }
 
-                            if !allow_missing {
+                            // Re-evaluate missing libraries after dependency installation
+                            let remaining_missing = if let Ok(recheck) =
+                                engine.preflight_check_with_profile(&artifact_path, &cli.profile)
+                            {
+                                recheck.missing_libraries
+                            } else {
+                                preflight.missing_libraries
+                            };
+
+                            if remaining_missing.is_empty() {
+                                println!("  ✓ All library dependencies successfully satisfied.");
+                            } else if !allow_missing {
+                                println!(
+                                    "\n⚠️  The following host libraries are still missing:\n  {}",
+                                    remaining_missing.join(", ")
+                                );
                                 let install_anyway = prompt_confirm(
-                                    "Install package anyway without dependencies? (Warning: the executable may fail at runtime) [y/N]: ",
+                                    "Install package anyway without these remaining libraries? (Warning: the executable may fail at runtime) [y/N]: ",
                                     false,
                                     yes,
                                 )?;
@@ -916,4 +941,20 @@ async fn download_with_progress(
     }
 
     Ok(path)
+}
+
+fn matches_missing_library(dep_name: &str, missing_lib: &str) -> bool {
+    let m_base = missing_lib.split('.').next().unwrap_or(missing_lib);
+    let dep_clean = dep_name.trim_end_matches(|c: char| c.is_ascii_digit());
+
+    if dep_name == m_base || dep_clean == m_base {
+        return true;
+    }
+    if !dep_clean.is_empty() && (m_base.starts_with(dep_clean) || dep_clean.starts_with(m_base)) {
+        return true;
+    }
+    if missing_lib.contains(dep_name) || dep_name.contains(m_base) {
+        return true;
+    }
+    false
 }

@@ -40,6 +40,15 @@ pub fn is_elf(path: &Path) -> bool {
 
 /// Inspects an ELF binary, extracts its `DT_NEEDED` dependencies, and checks compatibility.
 pub fn inspect_elf(elf_path: &Path, staging_root: Option<&Path>) -> Result<Option<ElfInspection>> {
+    inspect_elf_with_extra_paths(elf_path, staging_root, &[])
+}
+
+/// Inspects an ELF binary with additional search paths (e.g. store objects and profile lib dir).
+pub fn inspect_elf_with_extra_paths(
+    elf_path: &Path,
+    staging_root: Option<&Path>,
+    extra_search_dirs: &[std::path::PathBuf],
+) -> Result<Option<ElfInspection>> {
     if !is_elf(elf_path) {
         return Ok(None);
     }
@@ -91,16 +100,22 @@ pub fn inspect_elf(elf_path: &Path, staging_root: Option<&Path>) -> Result<Optio
                     break;
                 }
             }
-            // A library merely sitting in the package's `usr/lib` is not
-            // visible to the host loader after activation. It is usable only
-            // when the ELF's RPATH/RUNPATH resolves it (or a future runtime
-            // wrapper explicitly supplies a search path).
         }
 
         // Check host standard directories
         if !found {
             for &dir in STANDARD_LIB_DIRS {
                 if Path::new(dir).join(lib).exists() {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // Check extra search directories (e.g. profile lib or installed store packages)
+        if !found {
+            for dir in extra_search_dirs {
+                if dir.join(lib).exists() {
                     found = true;
                     break;
                 }

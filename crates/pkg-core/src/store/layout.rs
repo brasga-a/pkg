@@ -139,6 +139,12 @@ impl StoreLayout {
         self.profile_dir(profile).join("bin")
     }
 
+    /// Exposed shared libraries directory for a profile.
+    #[must_use]
+    pub fn profile_lib_dir(&self, profile: &str) -> PathBuf {
+        self.profile_dir(profile).join("lib")
+    }
+
     /// Directory holding state databases and metadata.
     #[must_use]
     pub fn state_dir(&self) -> PathBuf {
