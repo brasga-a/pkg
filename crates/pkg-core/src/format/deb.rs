@@ -332,6 +332,73 @@ impl DebAdapter {
 
         Ok(())
     }
+
+    /// Verifies that a materialized symlink (and any chain of links) does not escape `root`.
+    /// Handles existing target files as well as dangling/cross-package targets safely.
+    fn check_link_does_not_escape(root: &Path, relative: &Path, target: &Path) -> Result<()> {
+        let link_path = root.join(relative);
+        let parent = link_path.parent().unwrap_or(root);
+        let mut current = if parent.exists() {
+            fs::canonicalize(parent)?
+        } else {
+            root.to_path_buf()
+        };
+
+        if !current.starts_with(root) {
+            return Err(Error::SecurityViolation(format!(
+                "Symlink parent directory escapes staging: {}",
+                relative.display()
+            )));
+        }
+
+        for comp in target.components() {
+            match comp {
+                Component::Prefix(_) | Component::RootDir => {
+                    return Err(Error::SecurityViolation(format!(
+                        "Absolute symlink target rejected: {} -> {}",
+                        relative.display(),
+                        target.display()
+                    )));
+                }
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if current == root || !current.starts_with(root) {
+                        return Err(Error::SecurityViolation(format!(
+                            "Escaping payload link: {}",
+                            relative.display()
+                        )));
+                    }
+                    current.pop();
+                }
+                Component::Normal(c) => {
+                    let next = current.join(c);
+                    // If next exists and is a symlink, resolve it to detect chained escapes
+                    if next.is_symlink() {
+                        if let Ok(canon) = fs::canonicalize(&next) {
+                            if !canon.starts_with(root) {
+                                return Err(Error::SecurityViolation(format!(
+                                    "Escaping payload link: {}",
+                                    relative.display()
+                                )));
+                            }
+                            current = canon;
+                            continue;
+                        }
+                    }
+                    current = next;
+                }
+            }
+        }
+
+        if !current.starts_with(root) {
+            return Err(Error::SecurityViolation(format!(
+                "Escaping payload link: {}",
+                relative.display()
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 impl ArtifactAdapter for DebAdapter {
@@ -756,19 +823,8 @@ impl ArtifactAdapter for DebAdapter {
             std::os::unix::fs::symlink(target, destination.join(relative))?;
         }
         let root = fs::canonicalize(destination)?;
-        for (relative, _) in &pending_links {
-            let resolved = fs::canonicalize(destination.join(relative)).map_err(|e| {
-                Error::SecurityViolation(format!(
-                    "Unresolvable payload link {}: {e}",
-                    relative.display()
-                ))
-            })?;
-            if !resolved.starts_with(&root) {
-                return Err(Error::SecurityViolation(format!(
-                    "Escaping payload link: {}",
-                    relative.display()
-                )));
-            }
+        for (relative, target) in &pending_links {
+            Self::check_link_does_not_escape(&root, relative, target)?;
         }
 
         Ok(ExtractionReport {

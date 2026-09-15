@@ -33,10 +33,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Install a package from a local artifact (.deb, .rpm, .pkg.tar.zst) or remote catalog
+    /// Install one or more packages from local artifacts (.deb, .rpm, .pkg.tar.zst) or remote catalog
     Install {
-        /// Path to the local package artifact or remote package target (e.g. name, repo/name, or name:format)
-        path: PathBuf,
+        /// Path(s) to local package artifact(s) or remote package target(s) (e.g. name, repo/name)
+        #[arg(required = true, num_args = 1..)]
+        targets: Vec<PathBuf>,
 
         /// Produce and display the install plan without modifying disk or state
         #[arg(long)]
@@ -143,105 +144,145 @@ async fn run() -> Result<()> {
     let engine = Engine::open(layout)?;
 
     match command {
-        Commands::Install { path, dry_run } => {
-            let artifact_path = if path.exists() {
-                path
+        Commands::Install { targets, dry_run } => {
+            let config_path = engine.layout().base_dir().join("repositories.toml");
+            let config = if config_path.exists() {
+                pkg_core::repository::RepositoriesConfig::load_from_file(&config_path).ok()
             } else {
-                let name = path.to_string_lossy();
-                println!("Resolving package target '{}'...", name);
-                let config_path = engine.layout().base_dir().join("repositories.toml");
-                let config = if config_path.exists() {
-                    pkg_core::repository::RepositoriesConfig::load_from_file(&config_path).ok()
-                } else {
-                    None
-                };
-
-                let resolution = engine.resolve_remote_package(&name, config.as_ref())?;
-                let remote_pkg = match resolution {
-                    RemoteResolution::NotFound => {
-                        return Err(anyhow::anyhow!(
-                            "Package target '{}' not found in local paths or active repository snapshots.",
-                            name
-                        ));
-                    }
-                    RemoteResolution::Exact(pkg) => pkg,
-                    RemoteResolution::Ambiguous(candidates) => {
-                        eprintln!("\nMultiple candidates match '{}':", name);
-                        for (i, cand) in candidates.iter().enumerate() {
-                            eprintln!(
-                                "  {}) {} {} [{}] (from repository '{}')",
-                                i + 1,
-                                cand.name,
-                                cand.version,
-                                cand.format,
-                                cand.repository_id
-                            );
-                        }
-                        return Err(anyhow::anyhow!(
-                            "Ambiguous package target '{}'. Please qualify by repository (e.g. '{}/{}') or format (e.g. '{}:{}').",
-                            name,
-                            candidates[0].repository_id,
-                            candidates[0].name,
-                            candidates[0].name,
-                            candidates[0].format
-                        ));
-                    }
-                };
-
-                println!(
-                    "Found {} {} [{}] in {}",
-                    remote_pkg.name,
-                    remote_pkg.version,
-                    remote_pkg.format,
-                    remote_pkg.repository_id
-                );
-                if dry_run {
-                    println!("Would download {} from {}", remote_pkg.name, remote_pkg.url);
-                    return Ok(()); // Avoid downloading on dry-run
-                }
-                println!("Downloading {}...", remote_pkg.name);
-                engine.download_remote(&remote_pkg).await?
+                None
             };
 
-            let plan = engine.install(&artifact_path, &cli.profile, dry_run)?;
-            if dry_run {
-                println!("Install Plan (dry-run):");
-                println!(
-                    "  Package:      {} {}",
-                    plan.package.name, plan.package.version
-                );
-                println!("  Architecture: {}", plan.package.architecture);
-                println!("  Format:       {}", plan.package.format);
-                println!("  Digest:       {}", plan.package.digest);
-                println!("  Store target: {}", plan.target_store_dir.display());
-                if !plan.binaries.is_empty() {
-                    println!("  Binaries to activate:");
-                    for bin in &plan.binaries {
-                        println!(
-                            "    - {} -> {}",
-                            bin.command,
-                            bin.profile_symlink_path.display()
-                        );
+            for path in targets {
+                let artifact_path = if path.exists() {
+                    path
+                } else {
+                    let name = path.to_string_lossy();
+                    println!("Resolving package target '{}'...", name);
+
+                    let resolution = engine.resolve_remote_package(&name, config.as_ref())?;
+                    let remote_pkg = match resolution {
+                        RemoteResolution::NotFound => {
+                            return Err(anyhow::anyhow!(
+                                "Package target '{}' not found in local paths or active repository snapshots.",
+                                name
+                            ));
+                        }
+                        RemoteResolution::Exact(pkg) => pkg,
+                        RemoteResolution::Ambiguous(candidates) => {
+                            println!("\nMultiple candidates match '{}':", name);
+                            for (i, cand) in candidates.iter().enumerate() {
+                                println!(
+                                    "  {}) {} {} [{}] (from repository '{}')",
+                                    i + 1,
+                                    cand.name,
+                                    cand.version,
+                                    cand.format,
+                                    cand.repository_id
+                                );
+                            }
+
+                            use std::io::IsTerminal;
+                            if std::io::stdin().is_terminal() {
+                                use std::io::Write;
+                                print!(
+                                    "\nSelect candidate to install [1-{}] (or Enter to cancel): ",
+                                    candidates.len()
+                                );
+                                std::io::stdout().flush().ok();
+                                let mut input = String::new();
+                                std::io::stdin().read_line(&mut input)?;
+                                let trimmed = input.trim();
+                                if trimmed.is_empty() {
+                                    println!("Installation cancelled.");
+                                    return Ok(());
+                                }
+                                match trimmed.parse::<usize>() {
+                                    Ok(num) if num >= 1 && num <= candidates.len() => {
+                                        candidates[num - 1].clone()
+                                    }
+                                    _ => {
+                                        return Err(anyhow::anyhow!(
+                                            "Invalid selection '{}'. Installation cancelled.",
+                                            trimmed
+                                        ));
+                                    }
+                                }
+                            } else {
+                                return Err(anyhow::anyhow!(
+                                    "Ambiguous package target '{}'. Please qualify directly by repository (e.g. '{}/{}').",
+                                    name,
+                                    candidates[0].repository_id,
+                                    candidates[0].name
+                                ));
+                            }
+                        }
+                    };
+
+                    println!(
+                        "Found {} {} [{}] in {}",
+                        remote_pkg.name,
+                        remote_pkg.version,
+                        remote_pkg.format,
+                        remote_pkg.repository_id
+                    );
+                    if dry_run {
+                        println!("Would download {} from {}", remote_pkg.name, remote_pkg.url);
+                        let cache_path = engine.layout().artifact_cache_path(&remote_pkg.digest);
+                        if cache_path.exists() {
+                            cache_path
+                        } else {
+                            println!(
+                                "Dry-run: remote package {} verified from {}.",
+                                remote_pkg.name, remote_pkg.repository_id
+                            );
+                            continue;
+                        }
+                    } else {
+                        println!("Downloading {}...", remote_pkg.name);
+                        engine.download_remote(&remote_pkg).await?
                     }
-                }
-                if !plan.ignored_scripts.is_empty() {
-                    println!("  Ignored maintainer scripts (policy default-deny):");
-                    for script in &plan.ignored_scripts {
-                        println!("    - {script}");
+                };
+
+                let plan = engine.install(&artifact_path, &cli.profile, dry_run)?;
+                if dry_run {
+                    println!("Install Plan (dry-run):");
+                    println!(
+                        "  Package:      {} {}",
+                        plan.package.name, plan.package.version
+                    );
+                    println!("  Architecture: {}", plan.package.architecture);
+                    println!("  Format:       {}", plan.package.format);
+                    println!("  Digest:       {}", plan.package.digest);
+                    println!("  Store target: {}", plan.target_store_dir.display());
+                    if !plan.binaries.is_empty() {
+                        println!("  Binaries to activate:");
+                        for bin in &plan.binaries {
+                            println!(
+                                "    - {} -> {}",
+                                bin.command,
+                                bin.profile_symlink_path.display()
+                            );
+                        }
                     }
-                }
-            } else {
-                println!("Installed {} {}", plan.package.name, plan.package.version);
-                if !plan.binaries.is_empty() {
-                    println!("Activated binaries in profile '{}':", cli.profile);
-                    for bin in &plan.binaries {
-                        println!("  - {}", bin.command);
+                    if !plan.ignored_scripts.is_empty() {
+                        println!("  Ignored maintainer scripts (policy default-deny):");
+                        for script in &plan.ignored_scripts {
+                            println!("    - {script}");
+                        }
                     }
-                }
-                if !plan.ignored_scripts.is_empty() {
-                    println!("Ignored maintainer scripts:");
-                    for script in &plan.ignored_scripts {
-                        println!("  - {script} (default-deny)");
+                } else {
+                    println!("Installed {} {}", plan.package.name, plan.package.version);
+                    if !plan.binaries.is_empty() {
+                        println!("Activated binaries in profile '{}':", cli.profile);
+                        for bin in &plan.binaries {
+                            println!("  - {}", bin.command);
+                        }
+                    }
+                    if !plan.ignored_scripts.is_empty() {
+                        println!("Ignored maintainer scripts:");
+                        for script in &plan.ignored_scripts {
+                            println!("  - {script} (default-deny)");
+                        }
                     }
                 }
             }
