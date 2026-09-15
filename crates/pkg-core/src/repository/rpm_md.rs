@@ -347,11 +347,19 @@ pub async fn update_rpm_repository(
         .await
         .map_err(|e| Error::Network(e.to_string()))?;
 
+    // If redirected by a mirror manager, derive effective_base_url from the final location of repomd.xml
+    let effective_base_url =
+        if let Some(stripped) = response.url().as_str().strip_suffix("/repodata/repomd.xml") {
+            stripped.to_string()
+        } else {
+            base_url.to_string()
+        };
+
     let repomd_bytes = bounded_response(response, MAX_REPOMD_BYTES).await?;
 
     // 2. Cryptographic signature verification if public key configured
     if let Some(key_path) = public_key_path {
-        let asc_url = format!("{base_url}/repodata/repomd.xml.asc");
+        let asc_url = format!("{effective_base_url}/repodata/repomd.xml.asc");
         let sig_response = client
             .get(&asc_url)
             .send()
@@ -361,7 +369,7 @@ pub async fn update_rpm_repository(
         let sig_bytes = bounded_response(sig_response, 1024 * 1024).await?;
         verify_detached_signature(&repomd_bytes, &sig_bytes, key_path)?;
         println!(
-            "  ✓ Verified OpenPGP signature for RPM repository {base_url} using {}",
+            "  ✓ Verified OpenPGP signature for RPM repository {effective_base_url} using {}",
             key_path.display()
         );
     }
@@ -372,7 +380,7 @@ pub async fn update_rpm_repository(
     let primary_meta = parse_repomd_xml(&repomd_text)?;
 
     // 4. Download primary.xml archive
-    let primary_url = format!("{base_url}/{}", primary_meta.location_href);
+    let primary_url = format!("{effective_base_url}/{}", primary_meta.location_href);
     let primary_resp = client
         .get(&primary_url)
         .send()
@@ -404,7 +412,7 @@ pub async fn update_rpm_repository(
     };
 
     // 6. Parse packages
-    parse_primary_xml(decoder, host_arch, base_url)
+    parse_primary_xml(decoder, host_arch, &effective_base_url)
 }
 
 #[cfg(test)]

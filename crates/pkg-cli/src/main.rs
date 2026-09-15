@@ -320,7 +320,7 @@ priority = 10
 [[repository]]
 id = "fedora-41"
 format = "rpm"
-url = "https://download.fedoraproject.org/pub/fedora/linux/releases/41/Everything/x86_64/os"
+url = "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/41/Everything/x86_64/os"
 distribution = "41"
 components = []
 priority = 20
