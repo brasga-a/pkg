@@ -30,7 +30,12 @@ export default {
       return handleLandingPage(repo);
     }
 
-    // 3. Releases: latest.txt
+    // 3. Official Repositories Catalog: /repositories, /repositories.json
+    if (pathname === "/repositories" || pathname === "/repositories.json") {
+      return handleRepositories();
+    }
+
+    // 4. Releases: latest.txt
     if (pathname === "/releases/latest.txt" || pathname === "/latest.txt") {
       return handleLatestVersion(repo);
     }
@@ -126,13 +131,13 @@ async function handleLatestVersion(repo) {
     });
 
     if (!res.ok) {
-      return new Response("v0.1.0-beta.1\n", {
+      return new Response("v0.1.0-beta.2\n", {
         headers: { "Content-Type": "text/plain; charset=utf-8" }
       });
     }
 
     const data = await res.json();
-    const tag = data.tag_name || "v0.1.0-beta.1";
+    const tag = data.tag_name || "v0.1.0-beta.2";
     return new Response(`${tag}\n`, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
@@ -141,7 +146,7 @@ async function handleLatestVersion(repo) {
       }
     });
   } catch (_e) {
-    return new Response("v0.1.0-beta.1\n", {
+    return new Response("v0.1.0-beta.2\n", {
       headers: { "Content-Type": "text/plain; charset=utf-8" }
     });
   }
@@ -309,7 +314,7 @@ function handleLandingPage(repo) {
   <div class="container">
     <div class="badge">
       <span class="badge-dot"></span>
-      v0.1.0-beta.1 • Rootless & Universal
+      v0.1.0-beta.2 • Rootless & Universal
     </div>
     
     <div>
@@ -359,3 +364,144 @@ function handleLandingPage(repo) {
     }
   });
 }
+
+/**
+ * Serves curated repository catalog in JSON format
+ */
+function handleRepositories() {
+  const data = {
+    schema_version: "1.0",
+    updated_at: "2026-09-18T22:00:00Z",
+    repositories: [
+      {
+        id: "arch-core",
+        name: "Arch Linux Core",
+        distro: "arch",
+        format: "alpm",
+        url: "https://geo.mirror.pkgbuild.com",
+        distribution: "core",
+        components: [],
+        priority: 100,
+        description: "Core packages for Arch Linux",
+        default_for: ["arch"]
+      },
+      {
+        id: "arch-extra",
+        name: "Arch Linux Extra",
+        distro: "arch",
+        format: "alpm",
+        url: "https://geo.mirror.pkgbuild.com",
+        distribution: "extra",
+        components: [],
+        priority: 90,
+        description: "Extra packages for Arch Linux",
+        default_for: ["arch"]
+      },
+      {
+        id: "arch-multilib",
+        name: "Arch Linux Multilib",
+        distro: "arch",
+        format: "alpm",
+        url: "https://geo.mirror.pkgbuild.com",
+        distribution: "multilib",
+        components: [],
+        priority: 80,
+        description: "32-bit applications and libraries on 64-bit Arch Linux",
+        default_for: []
+      },
+      {
+        id: "ubuntu-noble",
+        name: "Ubuntu 24.04 LTS (Noble Numbat)",
+        distro: "ubuntu",
+        format: "deb",
+        url: "http://archive.ubuntu.com/ubuntu",
+        distribution: "noble",
+        components: ["main", "universe", "restricted", "multiverse"],
+        priority: 100,
+        description: "Ubuntu 24.04 LTS official repository",
+        default_for: ["ubuntu:24.04", "ubuntu:noble"]
+      },
+      {
+        id: "ubuntu-resolute",
+        name: "Ubuntu 26.04 LTS (Resolute Raccoon)",
+        distro: "ubuntu",
+        format: "deb",
+        url: "http://archive.ubuntu.com/ubuntu",
+        distribution: "resolute",
+        components: ["main", "universe", "restricted", "multiverse"],
+        priority: 90,
+        description: "Ubuntu 26.04 LTS official repository",
+        default_for: ["ubuntu:26.04", "ubuntu:resolute"]
+      },
+      {
+        id: "ubuntu-jammy",
+        name: "Ubuntu 22.04 LTS (Jammy Jellyfish)",
+        distro: "ubuntu",
+        format: "deb",
+        url: "http://archive.ubuntu.com/ubuntu",
+        distribution: "jammy",
+        components: ["main", "universe", "restricted", "multiverse"],
+        priority: 80,
+        description: "Ubuntu 22.04 LTS official repository",
+        default_for: ["ubuntu:22.04", "ubuntu:jammy"]
+      },
+      {
+        id: "debian-bookworm",
+        name: "Debian 12 (Bookworm)",
+        distro: "debian",
+        format: "deb",
+        url: "http://deb.debian.org/debian",
+        distribution: "bookworm",
+        components: ["main", "contrib", "non-free"],
+        priority: 100,
+        description: "Debian 12 official repository",
+        default_for: ["debian:12", "debian:bookworm"]
+      },
+      {
+        id: "debian-trixie",
+        name: "Debian 13 (Trixie)",
+        distro: "debian",
+        format: "deb",
+        url: "http://deb.debian.org/debian",
+        distribution: "trixie",
+        components: ["main", "contrib", "non-free"],
+        priority: 90,
+        description: "Debian 13 official repository",
+        default_for: ["debian:13", "debian:trixie"]
+      },
+      {
+        id: "fedora-41",
+        name: "Fedora 41",
+        distro: "fedora",
+        format: "rpm",
+        url: "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/41/Everything/x86_64/os",
+        distribution: "41",
+        components: [],
+        priority: 100,
+        description: "Fedora 41 official repository",
+        default_for: ["fedora:41"]
+      },
+      {
+        id: "fedora-42",
+        name: "Fedora 42 (Rawhide)",
+        distro: "fedora",
+        format: "rpm",
+        url: "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/42/Everything/x86_64/os",
+        distribution: "42",
+        components: [],
+        priority: 90,
+        description: "Fedora 42 official repository",
+        default_for: ["fedora:42", "fedora:rawhide"]
+      }
+    ]
+  };
+
+  return new Response(JSON.stringify(data, null, 2), {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "public, max-age=3600",
+      "Access-Control-Allow-Origin": "*"
+    }
+  });
+}
+

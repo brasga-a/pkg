@@ -64,7 +64,7 @@ pub async fn update_debian_repository(
     );
     let checksums = parse_release_checksums(&release)?;
     let host_arch = get_debian_architecture();
-    let fetches = futures::stream::iter(components.iter().map(|component| {
+    let fetches = futures::stream::iter(components.to_vec().into_iter().map(|component| {
         let client = &client;
         let checksums = &checksums;
         async move {

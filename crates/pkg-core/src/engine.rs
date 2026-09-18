@@ -1543,64 +1543,96 @@ impl Engine {
     /// Updates local repository snapshots using the provided configuration.
     ///
     /// Repositories (and their internal components) are fetched and verified in parallel
-    /// using asynchronous tasks, followed by atomic snapshot commits to SQLite.
+    /// using tokio::spawn tasks, followed by atomic snapshot commits to SQLite.
+    ///
+    /// If one repository fails (e.g. network timeout or signature mismatch), any successful
+    /// repositories are still safely committed, providing resilience. If ALL configured
+    /// repositories fail, an error is returned.
     pub async fn update(&self, config: &crate::repository::RepositoriesConfig) -> Result<usize> {
         let keyrings_dir = self.layout.keyrings_dir();
 
-        // Concurrently fetch and verify all repositories
-        let fetch_futures = config.repositories.iter().map(|repo| {
-            let keyrings_dir = keyrings_dir.clone();
-            let repo = repo.clone();
-            async move {
-                let key_path = repo.public_key_path.as_deref();
-                let mut packages = match repo.format.to_lowercase().as_str() {
-                    "rpm" => {
-                        crate::repository::rpm_md::update_rpm_repository(
-                            &repo.url,
-                            &repo.distribution,
-                            &repo.components,
-                            key_path,
-                            &keyrings_dir,
-                        )
-                        .await?
-                    }
-                    "alpm" => {
-                        crate::repository::alpm_sync::update_alpm_repository(
-                            &repo.url,
-                            &repo.distribution,
-                            &repo.components,
-                            key_path,
-                            &keyrings_dir,
-                        )
-                        .await?
-                    }
-                    _ => {
-                        crate::repository::deb::update_debian_repository(
-                            &repo.url,
-                            &repo.distribution,
-                            &repo.components,
-                            key_path,
-                            &keyrings_dir,
-                        )
-                        .await?
-                    }
-                };
+        // Concurrently fetch and verify all repositories using tokio::spawn
+        let handles: Vec<_> = config
+            .repositories
+            .iter()
+            .map(|repo| {
+                let keyrings_dir = keyrings_dir.clone();
+                let repo = repo.clone();
+                tokio::spawn(async move {
+                    let key_path = repo.public_key_path.as_deref();
+                    let mut packages = match repo.format.to_lowercase().as_str() {
+                        "rpm" => {
+                            crate::repository::rpm_md::update_rpm_repository(
+                                &repo.url,
+                                &repo.distribution,
+                                &repo.components,
+                                key_path,
+                                &keyrings_dir,
+                            )
+                            .await?
+                        }
+                        "alpm" => {
+                            crate::repository::alpm_sync::update_alpm_repository(
+                                &repo.url,
+                                &repo.distribution,
+                                &repo.components,
+                                key_path,
+                                &keyrings_dir,
+                            )
+                            .await?
+                        }
+                        _ => {
+                            crate::repository::deb::update_debian_repository(
+                                &repo.url,
+                                &repo.distribution,
+                                &repo.components,
+                                key_path,
+                                &keyrings_dir,
+                            )
+                            .await?
+                        }
+                    };
 
-                for pkg in &mut packages {
-                    pkg.repository_id = repo.id.clone();
+                    for pkg in &mut packages {
+                        pkg.repository_id = repo.id.clone();
+                    }
+
+                    Ok::<
+                        (
+                            crate::repository::RepositoryConfig,
+                            Vec<crate::domain::package::RemotePackage>,
+                        ),
+                        Error,
+                    >((repo, packages))
+                })
+            })
+            .collect();
+
+        let mut successes = Vec::new();
+        let mut failures = Vec::new();
+
+        for handle in handles {
+            match handle.await {
+                Ok(Ok((repo, packages))) => successes.push((repo, packages)),
+                Ok(Err(err)) => failures.push(err),
+                Err(join_err) => {
+                    failures.push(Error::Internal(format!("Repository task join error: {join_err}")));
                 }
-
-                Ok::<
-                    (
-                        crate::repository::RepositoryConfig,
-                        Vec<crate::domain::package::RemotePackage>,
-                    ),
-                    Error,
-                >((repo, packages))
             }
-        });
+        }
 
-        let results = futures::future::join_all(fetch_futures).await;
+        // Fail-closed only if all configured repositories failed
+        if successes.is_empty() && !config.repositories.is_empty() {
+            return Err(failures.into_iter().next().unwrap_or_else(|| {
+                Error::Internal("All repository synchronizations failed".to_string())
+            }));
+        }
+
+        for err in &failures {
+            tracing::warn!("Repository sync warning: {err}");
+            eprintln!("Warning: Failed to sync repository: {err}");
+        }
+
         // Network acquisition is intentionally outside the writer lock.  Once
         // every snapshot has been fetched and verified, serialize only the
         // short SQLite publication window.
@@ -1608,8 +1640,7 @@ impl Engine {
         let _ = Recovery::reconcile(&self.layout, &self.db)?;
 
         let mut total_packages = 0;
-        for res in results {
-            let (repo, packages) = res?;
+        for (repo, packages) in successes {
             self.db.commit_repository_snapshot(
                 &repo.id,
                 &repo.format,

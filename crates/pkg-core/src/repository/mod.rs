@@ -4,4 +4,4 @@ pub mod crypto;
 pub mod deb;
 pub mod rpm_md;
 
-pub use config::{RepositoriesConfig, RepositoryConfig};
+pub use config::{CuratedRegistry, CuratedRepository, RepositoriesConfig, RepositoryConfig};
