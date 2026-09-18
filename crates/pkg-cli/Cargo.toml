@@ -132,3 +132,7 @@ path = "../../tests/test_host_integration.rs"
 [[test]]
 name = "test_upgrade_apply"
 path = "../../tests/test_upgrade_apply.rs"
+
+[[test]]
+name = "test_curated_registry"
+path = "../../tests/test_curated_registry.rs"

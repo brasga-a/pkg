@@ -232,20 +232,25 @@ enum RepoCommands {
         /// Unique identifier for the repository (e.g., ubuntu-noble, fedora-41, arch-extra)
         id: String,
         /// Repository format ecosystem (deb, rpm, alpm)
-        #[arg(long, default_value = "deb")]
-        format: String,
+        #[arg(long)]
+        format: Option<String>,
         /// Repository base URL (e.g., http://archive.ubuntu.com/ubuntu)
-        url: String,
+        url: Option<String>,
         /// Distribution suite (e.g., noble, 41, extra)
-        distribution: String,
+        distribution: Option<String>,
         /// Components to fetch (e.g., main universe)
+        #[arg(trailing_var_arg = true)]
         components: Vec<String>,
         /// Repository priority (higher values preferred during resolution)
         #[arg(long)]
         priority: Option<u32>,
     },
     /// List configured repositories
-    List,
+    List {
+        /// List all official repositories available from the remote curated registry
+        #[arg(long, short)]
+        remote: bool,
+    },
     /// Synchronize repository metadata from configured remote repositories
     #[command(alias = "update")]
     Sync,
@@ -1202,7 +1207,66 @@ async fn run() -> Result<()> {
                 RepoCommands::Sync => {
                     sync_repositories(&engine, json_mode).await?;
                 }
-                RepoCommands::List => {
+                RepoCommands::List { remote } => {
+                    if remote {
+                        let registry =
+                            pkg_core::repository::CuratedRegistry::fetch_remote_or_fallback().await;
+                        let installed_ids: std::collections::HashSet<String> = if config_path
+                            .exists()
+                        {
+                            pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)
+                                .map(|cfg| cfg.repositories.into_iter().map(|r| r.id).collect())
+                                .unwrap_or_default()
+                        } else {
+                            std::collections::HashSet::new()
+                        };
+
+                        if json_mode {
+                            let repos_json: Vec<_> = registry
+                                .repositories
+                                .iter()
+                                .map(|r| {
+                                    serde_json::json!({
+                                        "id": r.id,
+                                        "name": r.name,
+                                        "distro": r.distro,
+                                        "format": r.format,
+                                        "url": r.url,
+                                        "distribution": r.distribution,
+                                        "components": r.components,
+                                        "priority": r.priority,
+                                        "installed": installed_ids.contains(&r.id),
+                                        "description": r.description,
+                                    })
+                                })
+                                .collect();
+                            emit_json(&serde_json::json!({
+                                "status": "success",
+                                "schema_version": registry.schema_version,
+                                "repositories": repos_json,
+                            }))?;
+                        } else {
+                            println!(
+                                "{:<18} {:<8} {:<6} {:<12} DESCRIPTION",
+                                "ID", "DISTRO", "FORMAT", "STATUS"
+                            );
+                            for r in &registry.repositories {
+                                let status = if installed_ids.contains(&r.id) {
+                                    "installed"
+                                } else {
+                                    "available"
+                                };
+                                let desc = r.description.as_deref().unwrap_or("-");
+                                println!(
+                                    "{:<18} {:<8} {:<6} {:<12} {}",
+                                    r.id, r.distro, r.format, status, desc
+                                );
+                            }
+                            println!("\nTip: Run `pkg repo add <id>` to enable an official repository.");
+                        }
+                        return Ok(());
+                    }
+
                     if !config_path.exists() {
                         if json_mode {
                             emit_json(
@@ -1210,6 +1274,7 @@ async fn run() -> Result<()> {
                             )?;
                         } else {
                             println!("No repositories configured.");
+                            println!("Run `pkg sync` or `pkg repo list --remote` to get started.");
                         }
                         return Ok(());
                     }
@@ -1260,22 +1325,58 @@ async fn run() -> Result<()> {
 
                     if config.repositories.iter().any(|r| r.id == id) {
                         return Err(anyhow::anyhow!(
-                            "Repository with ID '{}' already exists",
-                            id
+                            "Repository with ID '{}' already exists in {}",
+                            id,
+                            config_path.display()
                         ));
                     }
 
-                    config
-                        .repositories
-                        .push(pkg_core::repository::RepositoryConfig {
-                            id: id.clone(),
-                            format,
-                            url: url.clone(),
-                            distribution,
-                            components,
-                            public_key_path: None,
-                            priority,
-                        });
+                    let repo_to_add = match url {
+                        Some(url_str) => {
+                            let dist = distribution.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Distribution suite is required when adding a custom repository"
+                                )
+                            })?;
+                            pkg_core::repository::RepositoryConfig {
+                                id: id.clone(),
+                                format: format.unwrap_or_else(|| "deb".to_string()),
+                                url: url_str,
+                                distribution: dist,
+                                components,
+                                public_key_path: None,
+                                priority,
+                            }
+                        }
+                        None => {
+                            let registry =
+                                pkg_core::repository::CuratedRegistry::fetch_remote_or_fallback()
+                                    .await;
+                            let curated = registry.find_by_id(&id).ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Repository '{}' is not in the curated registry.\nUse: pkg repo add <id> <url> <distribution> [components...]\nOr check available repositories with: pkg repo list --remote",
+                                    id
+                                )
+                            })?;
+
+                            pkg_core::repository::RepositoryConfig {
+                                id: curated.id.clone(),
+                                format: format.unwrap_or_else(|| curated.format.clone()),
+                                url: curated.url.clone(),
+                                distribution: distribution
+                                    .unwrap_or_else(|| curated.distribution.clone()),
+                                components: if components.is_empty() {
+                                    curated.components.clone()
+                                } else {
+                                    components
+                                },
+                                public_key_path: curated.public_key_path.clone(),
+                                priority: priority.or(curated.priority),
+                            }
+                        }
+                    };
+
+                    config.repositories.push(repo_to_add.clone());
 
                     let toml_string = toml::to_string_pretty(&config)?;
                     std::fs::write(&config_path, toml_string)?;
@@ -1283,13 +1384,14 @@ async fn run() -> Result<()> {
                         emit_json(&serde_json::json!({
                             "status": "success",
                             "operation": "repo_add",
-                            "repository": config.repositories.last(),
+                            "repository": repo_to_add,
                         }))?;
                     } else {
-                        println!("Successfully added repository '{}' ({})", id, url);
-                    }
-                    if !json_mode {
-                        println!("Run `pkg sync` or `pkg repo update` to sync the new repository.");
+                        println!(
+                            "Successfully added repository '{}' ({})",
+                            repo_to_add.id, repo_to_add.url
+                        );
+                        println!("Run `pkg sync` or `pkg repo sync` to synchronize packages.");
                     }
                 }
             }
@@ -2063,56 +2165,19 @@ fn resolved_remote_candidate(
 async fn sync_repositories(engine: &Engine, json_mode: bool) -> Result<()> {
     let config_path = engine.layout().base_dir().join("repositories.toml");
     if !config_path.exists() {
+        let (distro_id, _) = pkg_core::host::HostFacts::detect_distro();
+        let distro_name = distro_id.as_deref().unwrap_or("generic");
         if !json_mode {
             println!(
-                "No repositories.toml found at {}. Generating defaults...",
-                config_path.display()
+                "No repositories.toml found at {}. Auto-detected host platform [{}]. Initializing native repositories...",
+                config_path.display(),
+                distro_name
             );
         }
-        std::fs::write(
-            &config_path,
-            r#"
-[[repository]]
-id = "ubuntu-noble"
-format = "deb"
-url = "http://archive.ubuntu.com/ubuntu"
-distribution = "noble"
-components = ["main", "universe", "restricted", "multiverse"]
-priority = 10
-
-[[repository]]
-id = "debian-bookworm"
-format = "deb"
-url = "http://deb.debian.org/debian"
-distribution = "bookworm"
-components = ["main", "contrib", "non-free"]
-priority = 10
-
-[[repository]]
-id = "fedora-41"
-format = "rpm"
-url = "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/41/Everything/x86_64/os"
-distribution = "41"
-components = []
-priority = 20
-
-[[repository]]
-id = "arch-core"
-format = "alpm"
-url = "https://geo.mirror.pkgbuild.com"
-distribution = "core"
-components = []
-priority = 30
-
-[[repository]]
-id = "arch-extra"
-format = "alpm"
-url = "https://geo.mirror.pkgbuild.com"
-distribution = "extra"
-components = []
-priority = 30
-"#,
-        )?;
+        let default_config = pkg_core::repository::RepositoriesConfig::default_for_host();
+        let toml_string = toml::to_string_pretty(&default_config)
+            .map_err(|e| anyhow::anyhow!("Failed to format default repositories.toml: {e}"))?;
+        std::fs::write(&config_path, toml_string)?;
     }
     if !json_mode {
         println!("Reading config from {}...", config_path.display());

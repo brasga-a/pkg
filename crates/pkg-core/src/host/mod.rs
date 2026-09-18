@@ -135,7 +135,14 @@ impl HostFacts {
         }
         values
     }
+
+    /// Returns default repository configuration for the host system using the curated registry.
+    #[must_use]
+    pub fn default_repositories_config() -> crate::repository::RepositoriesConfig {
+        crate::repository::RepositoriesConfig::default_for_host()
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
