@@ -72,6 +72,10 @@ enum Commands {
         #[arg(long = "ignore-missing-libs")]
         ignore_missing_libs: bool,
 
+        /// Skip resolving and installing declared dependencies
+        #[arg(long = "no-deps", alias = "skip-deps")]
+        no_deps: bool,
+
         /// Interactively select from matching package candidates
         #[arg(short = 'i', long = "interactive")]
         interactive: bool,
@@ -348,6 +352,7 @@ async fn run() -> Result<()> {
             yes,
             ignore_missing_libs,
             interactive,
+            no_deps,
         } => {
             let config_path = engine.layout().base_dir().join("repositories.toml");
             let config = if config_path.exists() {
@@ -639,7 +644,7 @@ async fn run() -> Result<()> {
                 // The planner will validate the resulting installed snapshot
                 // again, so a failed dependency can never be reported as a
                 // successful install.
-                if !dry_run {
+                if !dry_run && !no_deps {
                     if let Err(e) = install_declared_dependencies(
                         &engine,
                         &artifact_path,
@@ -684,27 +689,29 @@ async fn run() -> Result<()> {
                         }
 
                         let mut detected_deps = Vec::new();
-                        for dep in &preflight.package.dependencies {
-                            let dep_name = dep.name.as_str();
-                            if preflight
-                                .missing_libraries
-                                .iter()
-                                .any(|m| matches_missing_library(dep_name, m))
-                            {
-                                if let Ok(RemoteResolution::Exact(p)) = engine
-                                    .resolve_dependency_package(
-                                        dep_name,
-                                        preferred_repo.as_deref(),
-                                        preferred_format.as_deref(),
-                                        config.as_ref(),
-                                    )
+                        if !no_deps {
+                            for dep in &preflight.package.dependencies {
+                                let dep_name = dep.name.as_str();
+                                if preflight
+                                    .missing_libraries
+                                    .iter()
+                                    .any(|m| matches_missing_library(dep_name, m))
                                 {
-                                    if !detected_deps.iter().any(
-                                        |d: &pkg_core::domain::package::RemotePackage| {
-                                            d.name == p.name
-                                        },
-                                    ) {
-                                        detected_deps.push(p);
+                                    if let Ok(RemoteResolution::Exact(p)) = engine
+                                        .resolve_dependency_package(
+                                            dep_name,
+                                            preferred_repo.as_deref(),
+                                            preferred_format.as_deref(),
+                                            config.as_ref(),
+                                        )
+                                    {
+                                        if !detected_deps.iter().any(
+                                            |d: &pkg_core::domain::package::RemotePackage| {
+                                                d.name == p.name
+                                            },
+                                        ) {
+                                            detected_deps.push(p);
+                                        }
                                     }
                                 }
                             }
@@ -740,6 +747,7 @@ async fn run() -> Result<()> {
                                                 false,
                                                 InstallOptions {
                                                     allow_missing_libraries: false,
+                                                    skip_dependencies: false,
                                                 },
                                             ) {
                                                 Ok(_) => {
@@ -820,6 +828,7 @@ async fn run() -> Result<()> {
                     dry_run,
                     InstallOptions {
                         allow_missing_libraries: allow_missing,
+                        skip_dependencies: no_deps,
                     },
                 );
 
@@ -1262,7 +1271,9 @@ async fn run() -> Result<()> {
                                     r.id, r.distro, r.format, status, desc
                                 );
                             }
-                            println!("\nTip: Run `pkg repo add <id>` to enable an official repository.");
+                            println!(
+                                "\nTip: Run `pkg repo add <id>` to enable an official repository."
+                            );
                         }
                         return Ok(());
                     }
@@ -2434,6 +2445,10 @@ async fn mcp_call_tool(
                 .get("allow_missing_libs")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
+            let no_deps = arguments
+                .get("no_deps")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let config_path = engine.layout().base_dir().join("repositories.toml");
             let config = config_path
                 .is_file()
@@ -2453,22 +2468,24 @@ async fn mcp_call_tool(
                     }
                 };
                 let artifact = download_with_progress(engine, &remote, true).await?;
-                install_declared_dependencies(
-                    engine,
-                    &artifact,
-                    profile,
-                    Some(&remote.repository_id),
-                    Some(&remote.format),
-                    config.as_ref(),
-                    true,
-                    true,
-                    &[],
-                    1,
-                )
-                .await?;
+                if !no_deps {
+                    install_declared_dependencies(
+                        engine,
+                        &artifact,
+                        profile,
+                        Some(&remote.repository_id),
+                        Some(&remote.format),
+                        config.as_ref(),
+                        true,
+                        true,
+                        &[],
+                        1,
+                    )
+                    .await?;
+                }
                 artifact
             };
-            if std::path::Path::new(target).is_file() {
+            if !no_deps && std::path::Path::new(target).is_file() {
                 install_declared_dependencies(
                     engine,
                     &artifact,
@@ -2489,6 +2506,7 @@ async fn mcp_call_tool(
                 false,
                 InstallOptions {
                     allow_missing_libraries: allow_missing,
+                    skip_dependencies: no_deps,
                 },
             )?)?)
         }

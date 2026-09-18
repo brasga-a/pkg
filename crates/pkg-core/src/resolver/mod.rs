@@ -465,6 +465,11 @@ impl Resolver {
     ) -> Result<(), ResolutionError> {
         let current_id = format!("{}-{}", current_pkg.name, current_pkg.version);
 
+        // Check if already in closure or resolved
+        if resolved_names.contains(name) {
+            return Ok(());
+        }
+
         // Interpreter adapters may intentionally use a host interpreter. This
         // is capability evidence, not a general package-name equivalence: only
         // the reviewed interpreter names and unconstrained requirements qualify.
@@ -489,12 +494,39 @@ impl Resolver {
             }
         }
 
-        // Check if already in closure or resolved
-        if resolved_names.contains(name) {
+        // Check host evidence for virtual feature capability (e.g. gsettings-backend, dbus-session-bus)
+        if let Some(evidence) = self.host.provides_feature(name.as_str()) {
+            let version_ok = match version_constraint {
+                VersionConstraint::Any => true,
+                VersionConstraint::Relational(_, _) => {
+                    evidence.version.as_ref().is_some_and(|host_ver| {
+                        version_constraint.matches(host_ver.as_str(), VersionEcosystem::Debian)
+                    })
+                }
+            };
+            if version_ok {
+                host_satisfied.push(evidence.clone());
+                resolved_names.insert(name.clone());
+                return Ok(());
+            }
+        }
+
+        // Check host native packages matching ecosystem
+        if let Some(host_pkg) =
+            self.host
+                .provides_package(name.as_str(), version_constraint, ecosystem)
+        {
+            host_satisfied.push(CapabilityEvidence {
+                capability: Capability::Feature(name.to_string()),
+                version: Some(host_pkg.version.clone()),
+                provider_origin: format!("host:pkg:{}", host_pkg.name),
+                symbols: Vec::new(),
+            });
+            resolved_names.insert(name.clone());
             return Ok(());
         }
 
-        // Check installed packages
+        // Check installed packages (direct package match)
         if let Some(installed) = self.installed_packages.get(name)
             && !self.replaced_packages.contains(name)
         {
@@ -532,7 +564,32 @@ impl Resolver {
             }
         }
 
-        // Search repository candidates
+        // Check installed packages (virtual capability provider)
+        let cap_feature = CapabilityConstraint {
+            identifier: format!("feature:{name}"),
+            version: version_constraint.clone(),
+            original_expression: original_expr.to_string(),
+        };
+        for installed in self.installed_packages.values() {
+            if self.replaced_packages.contains(&installed.name) {
+                continue;
+            }
+            if self.package_provides_capability(installed, &cap_feature) {
+                installed_satisfied.push(format!("{}:{name}", installed.name));
+                resolved_names.insert(name.clone());
+                return Ok(());
+            }
+        }
+
+        // Check already selected closure packages
+        for pkg in closure.iter() {
+            if self.package_provides_capability(pkg, &cap_feature) {
+                resolved_names.insert(name.clone());
+                return Ok(());
+            }
+        }
+
+        // Search repository candidates (direct name match)
         let mut last_false_equivalence = None;
         let mut last_arch_mismatch = None;
         let mut last_version_mismatch = None;
@@ -598,25 +655,80 @@ impl Resolver {
                 closure.push(cand.clone());
                 return Ok(());
             }
+        }
 
-            if let Some(reason) = last_false_equivalence {
-                chain.add_step(&current_id, original_expr.to_string(), reason);
-                return Err(ResolutionError {
-                    chain: chain.clone(),
-                });
+        // Search repository candidates for a virtual package/capability provider (Provides: <name>)
+        let mut virtual_candidates: Vec<&NormalizedPackage> = self
+            .repository_packages
+            .values()
+            .flat_map(|candidates| candidates.iter())
+            .filter(|cand| {
+                if !cand.architecture.matches_host(&self.host.architecture) {
+                    return false;
+                }
+                let format_str = package_ecosystem(cand.format);
+                if !ecosystem.is_empty() && format_str != ecosystem {
+                    return false;
+                }
+                self.package_provides_capability(cand, &cap_feature)
+            })
+            .collect();
+        virtual_candidates.sort_by(|a, b| package_candidate_cmp(a, b));
+
+        for cand in virtual_candidates {
+            if resolved_names.contains(&cand.name) {
+                resolved_names.insert(name.clone());
+                return Ok(());
             }
-            if let Some(reason) = last_arch_mismatch {
-                chain.add_step(&current_id, original_expr.to_string(), reason);
-                return Err(ResolutionError {
-                    chain: chain.clone(),
-                });
+            if in_progress.contains(&cand.name) {
+                return Ok(());
             }
-            if let Some(reason) = last_version_mismatch {
-                chain.add_step(&current_id, original_expr.to_string(), reason);
-                return Err(ResolutionError {
-                    chain: chain.clone(),
-                });
+
+            in_progress.insert(cand.name.clone());
+            let mut sub_chain = chain.clone();
+            let mut sub_ok = true;
+            for sub_c in &cand.constraints {
+                if let Err(_e) = self.resolve_constraint(
+                    cand,
+                    sub_c,
+                    closure,
+                    host_satisfied,
+                    installed_satisfied,
+                    in_progress,
+                    resolved_names,
+                    &mut sub_chain,
+                ) {
+                    sub_ok = false;
+                    break;
+                }
             }
+            in_progress.remove(&cand.name);
+
+            if sub_ok {
+                resolved_names.insert(cand.name.clone());
+                resolved_names.insert(name.clone());
+                closure.push(cand.clone());
+                return Ok(());
+            }
+        }
+
+        if let Some(reason) = last_false_equivalence {
+            chain.add_step(&current_id, original_expr.to_string(), reason);
+            return Err(ResolutionError {
+                chain: chain.clone(),
+            });
+        }
+        if let Some(reason) = last_arch_mismatch {
+            chain.add_step(&current_id, original_expr.to_string(), reason);
+            return Err(ResolutionError {
+                chain: chain.clone(),
+            });
+        }
+        if let Some(reason) = last_version_mismatch {
+            chain.add_step(&current_id, original_expr.to_string(), reason);
+            return Err(ResolutionError {
+                chain: chain.clone(),
+            });
         }
 
         chain.add_step(
@@ -1328,5 +1440,82 @@ mod tests {
             .resolve(&target)
             .expect_err("host evidence without a version is incomplete");
         assert!(error.to_string().contains("does not satisfy"), "{error}");
+    }
+
+    #[test]
+    fn test_virtual_package_resolved_via_repository_provides() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .build();
+        // Repository has dconf-gsettings-backend which provides "gsettings-backend"
+        let dconf = make_pkg(
+            "dconf-gsettings-backend",
+            "0.40.0-4",
+            PackageFormat::Deb,
+            vec![],
+            vec![Capability::Feature("gsettings-backend".to_string())],
+        );
+        // Target app depends on virtual package "gsettings-backend"
+        let app = make_pkg(
+            "desktop-app",
+            "1.0.0",
+            PackageFormat::Deb,
+            vec![Constraint::Package {
+                name: PackageName::new("gsettings-backend").unwrap(),
+                version: VersionConstraint::Any,
+                ecosystem: "debian".into(),
+                original_expression: "gsettings-backend".into(),
+            }],
+            vec![],
+        );
+
+        let plan = Resolver::new(host)
+            .with_repository_packages(vec![dconf])
+            .resolve(&app)
+            .expect("virtual package requirement should be satisfied by repository package with Provides");
+
+        assert_eq!(plan.packages_to_install.len(), 1);
+        assert_eq!(
+            plan.packages_to_install[0].name.as_str(),
+            "dconf-gsettings-backend"
+        );
+    }
+
+    #[test]
+    fn test_virtual_package_satisfied_via_host_feature_evidence() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .add_feature("gsettings-backend")
+            .add_feature("default-dbus-session-bus")
+            .build();
+
+        // Target app depends on virtual package "gsettings-backend" and "default-dbus-session-bus"
+        let app = make_pkg(
+            "desktop-app",
+            "1.0.0",
+            PackageFormat::Deb,
+            vec![
+                Constraint::Package {
+                    name: PackageName::new("gsettings-backend").unwrap(),
+                    version: VersionConstraint::Any,
+                    ecosystem: "debian".into(),
+                    original_expression: "gsettings-backend".into(),
+                },
+                Constraint::Package {
+                    name: PackageName::new("default-dbus-session-bus").unwrap(),
+                    version: VersionConstraint::Any,
+                    ecosystem: "debian".into(),
+                    original_expression: "default-dbus-session-bus".into(),
+                },
+            ],
+            vec![],
+        );
+
+        let plan = Resolver::new(host)
+            .resolve(&app)
+            .expect("virtual package requirements should be satisfied by host feature evidence");
+
+        assert!(plan.packages_to_install.is_empty());
+        assert_eq!(plan.host_satisfied_capabilities.len(), 2);
     }
 }

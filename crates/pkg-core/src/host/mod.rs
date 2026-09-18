@@ -143,7 +143,6 @@ impl HostFacts {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -318,6 +318,7 @@ fn test_preflight_and_install_resolves_store_libraries() {
             false,
             InstallOptions {
                 allow_missing_libraries: false,
+                skip_dependencies: false,
             },
         )
         .unwrap();

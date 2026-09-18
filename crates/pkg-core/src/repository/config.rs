@@ -172,7 +172,11 @@ impl CuratedRegistry {
             .timeout(std::time::Duration::from_secs(4))
             .build();
         if let Ok(client) = client {
-            if let Ok(resp) = client.get("https://pkg.atlantic.sh/repositories").send().await {
+            if let Ok(resp) = client
+                .get("https://pkg.atlantic.sh/repositories")
+                .send()
+                .await
+            {
                 if resp.status().is_success() {
                     if let Ok(bytes) = resp.bytes().await {
                         if let Ok(registry) = serde_json::from_slice::<CuratedRegistry>(&bytes) {
@@ -188,7 +192,9 @@ impl CuratedRegistry {
     /// Finds a repository by ID (case-insensitive).
     #[must_use]
     pub fn find_by_id(&self, id: &str) -> Option<&CuratedRepository> {
-        self.repositories.iter().find(|r| r.id.eq_ignore_ascii_case(id))
+        self.repositories
+            .iter()
+            .find(|r| r.id.eq_ignore_ascii_case(id))
     }
 
     /// Selects the repositories that should be enabled by default for a host distribution.
@@ -340,7 +346,9 @@ impl RepositoriesConfig {
     pub fn default_for_host_with_registry(registry: &CuratedRegistry) -> Self {
         let (distro_id, distro_id_like) = crate::host::HostFacts::detect_distro();
         let metadata = crate::host::HostFacts::release_metadata();
-        let codename = metadata.get("os_release_VERSION_CODENAME").map(|s| s.as_str());
+        let codename = metadata
+            .get("os_release_VERSION_CODENAME")
+            .map(|s| s.as_str());
         let version_id = metadata.get("os_release_VERSION_ID").map(|s| s.as_str());
 
         let mut matched = if let Some(ref d) = distro_id {
@@ -360,7 +368,9 @@ impl RepositoriesConfig {
         }
 
         let repos = matched.into_iter().map(RepositoryConfig::from).collect();
-        RepositoriesConfig { repositories: repos }
+        RepositoriesConfig {
+            repositories: repos,
+        }
     }
 
     /// Loads the repository configuration from the specified TOML file.

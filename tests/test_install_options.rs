@@ -82,6 +82,7 @@ fn test_preflight_and_install_options() {
             false,
             InstallOptions {
                 allow_missing_libraries: true,
+                skip_dependencies: false,
             },
         )
         .unwrap();
@@ -117,4 +118,52 @@ fn test_preflight_and_install_options() {
         serde_json::Value::Bool(false)
     );
     assert!(engine.run_command("default", "missing-cmd", &[]).is_err());
+}
+
+#[test]
+fn test_install_options_skip_dependencies() {
+    let temp = tempdir().unwrap();
+    let artifact = temp.path().join("pkg-with-deps.deb");
+
+    DebPackageBuilder::new("app-with-deps")
+        .architecture("amd64")
+        .depends("non-existent-dependency-xyz (>= 1.0.0)")
+        .file("usr/bin/my-app", b"#!/bin/sh\necho hello\n", 0o755)
+        .write_to(&artifact)
+        .unwrap();
+
+    let layout = StoreLayout::new(temp.path().join("data"));
+    let engine = Engine::open(layout).unwrap();
+
+    // Default install: fails due to unresolvable dependency
+    let err = engine.install_with_options(
+        &artifact,
+        "default",
+        false,
+        InstallOptions {
+            allow_missing_libraries: false,
+            skip_dependencies: false,
+        },
+    );
+    assert!(err.is_err(), "should fail resolving missing dependency");
+
+    // With skip_dependencies: true, installation succeeds
+    let plan = engine
+        .install_with_options(
+            &artifact,
+            "default",
+            false,
+            InstallOptions {
+                allow_missing_libraries: false,
+                skip_dependencies: true,
+            },
+        )
+        .expect("should succeed when skipping dependencies");
+
+    assert_eq!(plan.package.name.as_str(), "app-with-deps");
+    assert_eq!(plan.resolved_dependencies.len(), 0);
+
+    let list = engine.list("default").unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].name.as_str(), "app-with-deps");
 }

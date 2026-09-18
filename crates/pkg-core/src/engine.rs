@@ -53,6 +53,8 @@ pub enum PackageInfo {
 pub struct InstallOptions {
     /// If true, missing shared libraries detected in ELF binaries will not abort installation.
     pub allow_missing_libraries: bool,
+    /// If true, package dependency resolution is skipped.
+    pub skip_dependencies: bool,
 }
 
 /// Report returned by preflight inspection of an uninstalled package artifact.
@@ -422,13 +424,31 @@ impl Engine {
         profile: &str,
         replaced_packages: &[crate::domain::package::PackageName],
     ) -> Result<InstallPlan> {
-        Planner::plan_install_with_replacements(
+        self.plan_install_with_options_replacing(
+            artifact_path,
+            profile,
+            replaced_packages,
+            &InstallOptions::default(),
+        )
+    }
+
+    /// Plans an install while treating the listed installed package names
+    /// as replacements in the same upgrade transaction and applying the specified options.
+    pub fn plan_install_with_options_replacing(
+        &self,
+        artifact_path: &Path,
+        profile: &str,
+        replaced_packages: &[crate::domain::package::PackageName],
+        options: &InstallOptions,
+    ) -> Result<InstallPlan> {
+        Planner::plan_install_with_replacements_and_options(
             artifact_path,
             &self.layout,
             &self.db,
             profile,
             true,
             replaced_packages,
+            options,
         )
     }
 
@@ -498,7 +518,12 @@ impl Engine {
         replaced_packages: &[crate::domain::package::PackageName],
     ) -> Result<InstallPlan> {
         if is_dry_run {
-            return self.plan_install_with_replacements(artifact_path, profile, replaced_packages);
+            return self.plan_install_with_options_replacing(
+                artifact_path,
+                profile,
+                replaced_packages,
+                &options,
+            );
         }
 
         // Acquire process lock to prevent concurrent state mutations (INV-012)
@@ -508,13 +533,14 @@ impl Engine {
         let _ = Recovery::reconcile(&self.layout, &self.db)?;
 
         // Plan installation
-        let mut plan = Planner::plan_install_with_replacements(
+        let mut plan = Planner::plan_install_with_replacements_and_options(
             artifact_path,
             &self.layout,
             &self.db,
             profile,
             false,
             replaced_packages,
+            &options,
         )?;
         let old_pkg = self.db.get_package(profile, plan.package.name.as_str())?;
         let old_binaries = self
@@ -1616,7 +1642,9 @@ impl Engine {
                 Ok(Ok((repo, packages))) => successes.push((repo, packages)),
                 Ok(Err(err)) => failures.push(err),
                 Err(join_err) => {
-                    failures.push(Error::Internal(format!("Repository task join error: {join_err}")));
+                    failures.push(Error::Internal(format!(
+                        "Repository task join error: {join_err}"
+                    )));
                 }
             }
         }

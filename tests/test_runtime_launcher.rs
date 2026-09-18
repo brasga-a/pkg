@@ -35,6 +35,7 @@ fn test_python_runtime_launcher_and_scoped_pythonpath() {
             false,
             InstallOptions {
                 allow_missing_libraries: false,
+                skip_dependencies: false,
             },
         )
         .unwrap();
@@ -235,6 +236,7 @@ fn test_native_runner_uses_promoted_package_library_view() {
             false,
             InstallOptions {
                 allow_missing_libraries: false,
+                skip_dependencies: false,
             },
         )
         .unwrap();
@@ -573,6 +575,7 @@ fn package_rpath_cannot_escape_staging_root() {
             false,
             InstallOptions {
                 allow_missing_libraries: false,
+                skip_dependencies: false,
             },
         )
         .unwrap_err();
