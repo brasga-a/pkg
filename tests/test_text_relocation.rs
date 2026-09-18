@@ -69,6 +69,7 @@ Type=Application
             false,
             InstallOptions {
                 allow_missing_libraries: false,
+                skip_dependencies: false,
             },
         )
         .unwrap();

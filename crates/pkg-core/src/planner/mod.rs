@@ -43,6 +43,28 @@ impl Planner {
         is_dry_run: bool,
         replaced_packages: &[PackageName],
     ) -> Result<InstallPlan> {
+        Self::plan_install_with_replacements_and_options(
+            artifact_path,
+            layout,
+            db,
+            profile,
+            is_dry_run,
+            replaced_packages,
+            &crate::engine::InstallOptions::default(),
+        )
+    }
+
+    /// Plans an install while treating the listed installed package names as
+    /// replacements in the same transaction and respecting customized install options.
+    pub fn plan_install_with_replacements_and_options(
+        artifact_path: &Path,
+        layout: &StoreLayout,
+        db: &StateDatabase,
+        profile: &str,
+        is_dry_run: bool,
+        replaced_packages: &[PackageName],
+        options: &crate::engine::InstallOptions,
+    ) -> Result<InstallPlan> {
         StoreLayout::validate_profile(profile)?;
         let format = crate::format::detect_format(artifact_path)?;
         let adapter = crate::format::get_adapter(format);
@@ -58,10 +80,9 @@ impl Planner {
         }
 
         // Resolve declared package/capability constraints before producing an
-        // install plan. The resolver receives only immutable snapshots and
-        // evidence derived from the host and pkg-owned installed payloads.
+        // install plan, unless dependency resolution is explicitly skipped.
         let mut resolved_dependencies = Vec::new();
-        if !package.constraints.is_empty() {
+        if !options.skip_dependencies && !package.constraints.is_empty() {
             let mut host_evidence = HostEvidence::detect(&host);
             let profile_lib_dir = layout.profile_lib_dir(profile);
             if profile_lib_dir.is_dir()

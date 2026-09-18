@@ -40,6 +40,7 @@ fn test_rpm_noarch_metadata_and_installation() {
             false,
             InstallOptions {
                 allow_missing_libraries: false,
+                skip_dependencies: false,
             },
         )
         .unwrap();
