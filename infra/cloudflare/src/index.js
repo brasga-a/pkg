@@ -45,10 +45,13 @@ export default {
         return Response.redirect(`https://github.com/${repo}/releases/latest/download/${asset}`, 302);
       }
 
-      // Case B: /releases/<version>/<asset> (e.g. /releases/v0.1.0-beta.1/pkg-linux-x86_64.tar.gz)
+      // Case B: /releases/<version>/<asset> (e.g. /releases/0.1.0-beta.1/... or /releases/v0.1.0-beta.1/...)
       if (parts.length >= 2) {
-        const version = parts[0];
+        let version = parts[0];
         const asset = parts.slice(1).join("/");
+        if (!version.startsWith("v") && /^[0-9]/.test(version)) {
+          version = `v${version}`;
+        }
         return Response.redirect(`https://github.com/${repo}/releases/download/${version}/${asset}`, 302);
       }
 
@@ -123,13 +126,13 @@ async function handleLatestVersion(repo) {
     });
 
     if (!res.ok) {
-      return new Response("0.1.0-beta.1\n", {
+      return new Response("v0.1.0-beta.1\n", {
         headers: { "Content-Type": "text/plain; charset=utf-8" }
       });
     }
 
     const data = await res.json();
-    const tag = data.tag_name || "latest";
+    const tag = data.tag_name || "v0.1.0-beta.1";
     return new Response(`${tag}\n`, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
@@ -138,7 +141,7 @@ async function handleLatestVersion(repo) {
       }
     });
   } catch (_e) {
-    return new Response("0.1.0-beta.1\n", {
+    return new Response("v0.1.0-beta.1\n", {
       headers: { "Content-Type": "text/plain; charset=utf-8" }
     });
   }
