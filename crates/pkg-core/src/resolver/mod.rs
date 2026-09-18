@@ -570,7 +570,7 @@ impl Resolver {
             version: version_constraint.clone(),
             original_expression: original_expr.to_string(),
         };
-        for (_installed_name, installed) in &self.installed_packages {
+        for installed in self.installed_packages.values() {
             if self.replaced_packages.contains(&installed.name) {
                 continue;
             }
