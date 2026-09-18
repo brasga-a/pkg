@@ -131,6 +131,15 @@ struct PrefixRule<'a> {
     allow_bare_dir: bool,
 }
 
+/// Exact outputs produced by the reviewed relocation recipes.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RelocationReport {
+    /// Existing payload files whose text was rewritten by the FHS recipe.
+    pub modified_files: Vec<PathBuf>,
+    /// Default files materialized from a matching `.ucf` input.
+    pub generated_files: Vec<PathBuf>,
+}
+
 /// Relocates hardcoded FHS paths inside a text string if any matches are found.
 ///
 /// Returns `Some(relocated_text)` if modifications occurred, or `None` if the text was unchanged.
@@ -358,8 +367,20 @@ pub fn relocate_extracted_text_files(
     target_store_dir: &Path,
     extracted_files: &[PathBuf],
 ) -> Result<usize> {
+    let report =
+        relocate_extracted_text_files_with_report(staging_dir, target_store_dir, extracted_files)?;
+    Ok(report.modified_files.len())
+}
+
+/// Applies the versioned text and `.ucf` recipes and returns their exact
+/// outputs for the install manifest.
+pub fn relocate_extracted_text_files_with_report(
+    staging_dir: &Path,
+    target_store_dir: &Path,
+    extracted_files: &[PathBuf],
+) -> Result<RelocationReport> {
     let index = PackageFhsIndex::from_extracted_files(extracted_files);
-    let mut modified_count = 0;
+    let mut report = RelocationReport::default();
 
     for rel_path in extracted_files {
         let full_path = staging_dir.join(rel_path);
@@ -376,9 +397,7 @@ pub fn relocate_extracted_text_files(
             continue;
         }
 
-        let Ok(bytes) = fs::read(&full_path) else {
-            continue;
-        };
+        let bytes = fs::read(&full_path)?;
 
         // Binary check: skip files with null bytes in the first 4096 bytes
         if bytes.iter().take(4096).any(|&b| b == 0) {
@@ -393,11 +412,50 @@ pub fn relocate_extracted_text_files(
             let perms = meta.permissions();
             fs::write(&full_path, new_text.as_bytes())?;
             fs::set_permissions(&full_path, perms)?;
-            modified_count += 1;
+            report.modified_files.push(rel_path.clone());
+        }
+
+        // Materialize only the explicitly paired `.ucf` default.  A suffix is
+        // not permission to copy a template into every discovered `etc/`
+        // directory; unrelated configuration remains untouched.
+        if rel_path.extension().and_then(|e| e.to_str()) == Some("ucf") {
+            let mut target = full_path.clone();
+            target.set_extension("");
+            if target.exists() {
+                let target_meta = fs::symlink_metadata(&target)?;
+                if target_meta.file_type().is_symlink() || !target_meta.is_file() {
+                    return Err(crate::error::Error::SecurityViolation(format!(
+                        "mapped .ucf destination is not a regular file: {}",
+                        target.display()
+                    )));
+                }
+            } else {
+                let parent = target.parent().ok_or_else(|| {
+                    crate::error::Error::SecurityViolation(format!(
+                        "mapped .ucf destination has no parent: {}",
+                        target.display()
+                    ))
+                })?;
+                if !parent.is_dir() {
+                    return Err(crate::error::Error::SecurityViolation(format!(
+                        "mapped .ucf destination parent is unavailable: {}",
+                        parent.display()
+                    )));
+                }
+                fs::copy(&full_path, &target)?;
+                fs::set_permissions(&target, meta.permissions())?;
+                let relative = target.strip_prefix(staging_dir).map_err(|_| {
+                    crate::error::Error::SecurityViolation(format!(
+                        "mapped .ucf destination escapes staging: {}",
+                        target.display()
+                    ))
+                })?;
+                report.generated_files.push(relative.to_path_buf());
+            }
         }
     }
 
-    Ok(modified_count)
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -514,5 +572,36 @@ exec /usr/bin/env python3 /etc/mytool/config.toml
                 "/home/user/.local/share/pkg/store/456-mytool-1.0/etc/mytool/config.toml"
             )
         );
+    }
+
+    #[test]
+    fn ucf_materialization_uses_only_exact_sibling_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let source = staging.join("usr/lib/R/etc/Renviron.ucf");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"R_HOME=/usr/lib/R\n").unwrap();
+
+        let report = relocate_extracted_text_files_with_report(
+            &staging,
+            Path::new("/home/user/.local/share/pkg/store/realization"),
+            &[PathBuf::from("usr/lib/R/etc/Renviron.ucf")],
+        )
+        .unwrap();
+
+        let destination = staging.join("usr/lib/R/etc/Renviron");
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"R_HOME=/home/user/.local/share/pkg/store/realization/usr/lib/R\n"
+        );
+        assert_eq!(
+            report.generated_files,
+            vec![PathBuf::from("usr/lib/R/etc/Renviron")]
+        );
+        assert_eq!(
+            report.modified_files,
+            vec![PathBuf::from("usr/lib/R/etc/Renviron.ucf")]
+        );
+        assert!(!staging.join("etc/R/Renviron").exists());
     }
 }

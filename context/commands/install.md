@@ -1,13 +1,12 @@
 # `pkg install`
 
-Install a package from a repository name, local artifact, or explicit URL.
+Install a package from a repository name or local artifact.
 
 ## Syntax
 
 ```bash
 pkg install <package>
 pkg install <path>
-pkg install <url>
 ```
 
 Examples:
@@ -15,7 +14,6 @@ Examples:
 ```bash
 pkg install ripgrep
 pkg install ./vendor.deb
-pkg install https://example.org/vendor.deb
 pkg install ripgrep --dry-run
 ```
 
@@ -57,13 +55,9 @@ local file
  -> transaction
 ```
 
-### Explicit URL
-
-```bash
-pkg install https://vendor.example/app.deb
-```
-
-The URL is provenance, not package identity. The artifact receives a local cryptographic digest before promotion.
+Explicit URL installation remains outside the current command contract. It
+requires a separate provenance and verification path before documentation can
+promise it.
 
 ## High-level flow
 
@@ -111,7 +105,10 @@ Before mutation, `pkg` should know:
 - conflicts;
 - unsupported integrations.
 
-`--dry-run` stops after producing this plan.
+`--dry-run` stops after producing this plan. It does not synchronize catalogs,
+download missing artifacts, create a database or write a temporary extraction.
+When required bytes are absent, it reports an incomplete preview and exits
+unsuccessfully for a requested verified plan.
 
 ## Package script policy
 

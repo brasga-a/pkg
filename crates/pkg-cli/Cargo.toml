@@ -24,6 +24,8 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 indicatif = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
@@ -102,3 +104,31 @@ path = "../../tests/test_interactive_install.rs"
 [[test]]
 name = "test_text_relocation"
 path = "../../tests/test_text_relocation.rs"
+
+[[test]]
+name = "test_profiles"
+path = "../../tests/test_profiles.rs"
+
+[[test]]
+name = "test_cli_json"
+path = "../../tests/test_cli_json.rs"
+
+[[test]]
+name = "test_mcp"
+path = "../../tests/test_mcp.rs"
+
+[[test]]
+name = "test_upgrade_plan"
+path = "../../tests/test_upgrade_plan.rs"
+
+[[test]]
+name = "test_fault_injection"
+path = "../../tests/test_fault_injection.rs"
+
+[[test]]
+name = "test_host_integration"
+path = "../../tests/test_host_integration.rs"
+
+[[test]]
+name = "test_upgrade_apply"
+path = "../../tests/test_upgrade_apply.rs"

@@ -5,6 +5,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::domain::contracts::{
+    AdaptationPlan, ArtifactEvidence, ExecutionPlan, PayloadManifest, RuntimeManifest,
+};
 use crate::domain::package::{NormalizedPackage, PackageName, PackageVersion};
 
 /// An executable binary activation link within a profile.
@@ -40,6 +43,25 @@ pub struct InstallPlan {
     pub missing_libraries: Vec<String>,
     /// Whether this is a dry-run execution.
     pub is_dry_run: bool,
+    /// Evidence for the source artifact and trust boundary.
+    #[serde(default)]
+    pub artifact_evidence: Option<ArtifactEvidence>,
+    /// Realized payload manifest, populated after staging for a normal install.
+    #[serde(default)]
+    pub payload_manifest: Option<PayloadManifest>,
+    /// Explicit transformations applied before publication.
+    #[serde(default)]
+    pub adaptations: Vec<AdaptationPlan>,
+    /// Per-command execution contracts.
+    #[serde(default)]
+    pub executions: Vec<ExecutionPlan>,
+    /// Runtime manifests referenced by the execution contracts.
+    #[serde(default)]
+    pub runtimes: Vec<RuntimeManifest>,
+    /// Additional normalized packages selected by the resolver for the root
+    /// package's dependency closure.
+    #[serde(default)]
+    pub resolved_dependencies: Vec<NormalizedPackage>,
 }
 
 /// A side-effect-free plan for removing a package.

@@ -13,7 +13,7 @@ use crate::domain::capability::{Capability, Dependency};
 use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstraint, VersionOp};
 use crate::domain::package::{
     Architecture, ArtifactDigest, LifecycleScript, NormalizedPackage, PackageEntry, PackageFormat,
-    PackageName, PackageVersion,
+    PackageName, PackageVersion, VersionedCapability,
 };
 use crate::error::{Error, Result};
 use crate::format::{ArtifactAdapter, ExtractionLimits, ExtractionReport};
@@ -150,45 +150,7 @@ impl DebAdapter {
     }
 
     fn parse_single_debian_constraint(raw_item: &str) -> Option<Constraint> {
-        let item = raw_item.trim();
-        if item.is_empty() {
-            return None;
-        }
-
-        let (name, ver_op, ver_val) = if let Some(open) = item.find('(') {
-            let name = item[..open].trim();
-            let close = item.find(')').unwrap_or(item.len());
-            let inner = item[open + 1..close].trim();
-            let mut parts = inner.split_whitespace();
-            let op_str = parts.next().unwrap_or("");
-            let ver_str = parts.next().unwrap_or("");
-
-            let op = match op_str {
-                ">=" => Some(VersionOp::GreaterEqual),
-                "<=" => Some(VersionOp::LessEqual),
-                ">>" | ">" => Some(VersionOp::Greater),
-                "<<" | "<" => Some(VersionOp::Less),
-                "=" => Some(VersionOp::Exact),
-                _ => None,
-            };
-
-            (
-                name,
-                op,
-                if ver_str.is_empty() {
-                    None
-                } else {
-                    Some(ver_str)
-                },
-            )
-        } else {
-            (item, None, None)
-        };
-
-        let ver_constraint = match (ver_op, ver_val) {
-            (Some(op), Some(val)) => VersionConstraint::Relational(op, PackageVersion::new(val)),
-            _ => VersionConstraint::Any,
-        };
+        let (name, ver_constraint) = Self::parse_debian_name_version(raw_item)?;
 
         if name.starts_with("lib") && (name.contains(".so") || name.ends_with(".so")) {
             Some(Constraint::Capability(CapabilityConstraint {
@@ -212,7 +174,42 @@ impl DebAdapter {
         }
     }
 
-    fn parse_constraints(fields: &HashMap<String, String>) -> Vec<Constraint> {
+    fn parse_debian_name_version(raw_item: &str) -> Option<(&str, VersionConstraint)> {
+        let item = raw_item.trim();
+        if item.is_empty() {
+            return None;
+        }
+
+        let (name, ver_op, ver_val) = if let Some(open) = item.find('(') {
+            let name = item[..open].trim();
+            let close = item.find(')').unwrap_or(item.len());
+            let inner = item[open + 1..close].trim();
+            let mut parts = inner.split_whitespace();
+            let op_str = parts.next().unwrap_or("");
+            let ver_str = parts.next().unwrap_or("");
+            let op = match op_str {
+                ">=" => Some(VersionOp::GreaterEqual),
+                "<=" => Some(VersionOp::LessEqual),
+                ">>" | ">" => Some(VersionOp::Greater),
+                "<<" | "<" => Some(VersionOp::Less),
+                "=" => Some(VersionOp::Exact),
+                _ => None,
+            };
+            (name, op, (!ver_str.is_empty()).then_some(ver_str))
+        } else {
+            (item, None, None)
+        };
+
+        let version = match (ver_op, ver_val) {
+            (Some(op), Some(value)) => {
+                VersionConstraint::Relational(op, PackageVersion::new(value))
+            }
+            _ => VersionConstraint::Any,
+        };
+        Some((name, version))
+    }
+
+    pub(crate) fn parse_constraints(fields: &HashMap<String, String>) -> Vec<Constraint> {
         let mut constraints = Vec::new();
 
         if let Some(depends_raw) = fields.get("Depends") {
@@ -244,20 +241,70 @@ impl DebAdapter {
             }
         }
 
-        if let Some(conflicts_raw) = fields.get("Conflicts").or_else(|| fields.get("Breaks")) {
-            for item in conflicts_raw.split(',') {
-                let item = item.trim();
-                if !item.is_empty() {
-                    let target = item.split_whitespace().next().unwrap_or(item).to_string();
-                    constraints.push(Constraint::Conflict {
-                        target,
-                        original_expression: item.to_string(),
-                    });
+        for field in ["Conflicts", "Breaks"] {
+            if let Some(conflicts_raw) = fields.get(field) {
+                for item in conflicts_raw.split(',') {
+                    let item = item.trim();
+                    if !item.is_empty() {
+                        let (target, version) = Self::parse_debian_name_version(item)
+                            .unwrap_or((item, VersionConstraint::Any));
+                        constraints.push(Constraint::Conflict {
+                            target: target.to_string(),
+                            version,
+                            original_expression: item.to_string(),
+                        });
+                    }
                 }
             }
         }
 
         constraints
+    }
+
+    /// Parses Debian's virtual `Provides` field into normalized capabilities.
+    /// Versioned provides retain their relational version as a capability
+    /// suffix so cross-ecosystem resolution can require exact evidence.
+    pub(crate) fn parse_provides(
+        fields: &HashMap<String, String>,
+    ) -> (Vec<Capability>, Vec<VersionedCapability>) {
+        let Some(raw) = fields.get("Provides") else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut capabilities = Vec::new();
+        let mut versioned = Vec::new();
+        for item in raw.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let name = item.split_whitespace().next().unwrap_or(item);
+            let capability = if name.contains(".so") {
+                Capability::SharedLibrary(name.to_string())
+            } else {
+                Capability::Feature(name.to_string())
+            };
+            let version_text = item
+                .strip_prefix(name)
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim();
+            if let Some(version) = version_text.strip_prefix('=').map(str::trim)
+                && !version.is_empty()
+            {
+                let version = PackageVersion::new(version);
+                if version.validate().is_ok() {
+                    versioned.push(VersionedCapability {
+                        capability,
+                        version,
+                    });
+                    continue;
+                }
+            }
+            capabilities.push(capability);
+        }
+        (capabilities, versioned)
     }
 
     /// Validates a relative archive path to guarantee it cannot escape the staging root.
@@ -288,49 +335,13 @@ impl DebAdapter {
         Ok(normalized)
     }
 
-    /// Verifies that a symlink target does not escape the destination directory.
+    /// Verifies and sanitizes a symlink target, relativizing absolute targets to the package root.
     fn validate_symlink_target(
         entry_path: &Path,
         target: &Path,
         staging_root: &Path,
-    ) -> Result<()> {
-        if target.is_absolute() {
-            return Err(Error::SecurityViolation(format!(
-                "Absolute symlink target rejected: {} -> {}",
-                entry_path.display(),
-                target.display()
-            )));
-        }
-
-        // Resolve target relative to entry parent
-        let entry_dir = entry_path.parent().unwrap_or(Path::new(""));
-        let mut resolved = staging_root.join(entry_dir);
-        for comp in target.components() {
-            match comp {
-                Component::ParentDir => {
-                    if resolved == staging_root {
-                        return Err(Error::SecurityViolation(format!(
-                            "Escaping symlink rejected: {} points outside staging ({})",
-                            entry_path.display(),
-                            target.display()
-                        )));
-                    }
-                    resolved.pop();
-                }
-                Component::Normal(c) => {
-                    resolved.push(c);
-                }
-                Component::CurDir => {}
-                Component::Prefix(_) | Component::RootDir => {
-                    return Err(Error::SecurityViolation(format!(
-                        "Absolute component in symlink target: {}",
-                        target.display()
-                    )));
-                }
-            }
-        }
-
-        Ok(())
+    ) -> Result<PathBuf> {
+        super::sanitize_symlink_target(entry_path, target, staging_root)
     }
 
     /// Verifies that a materialized symlink (and any chain of links) does not escape `root`.
@@ -555,17 +566,11 @@ impl ArtifactAdapter for DebAdapter {
         // Parse data.tar.* entries for inventory
         let mut data_tar = Self::make_tar_reader(&data_name, Box::new(Cursor::new(data_bytes)))?;
         let mut entries = Vec::new();
-        let mut provides = Vec::new();
-
-        if let Some(provides_raw) = fields.get("Provides") {
-            for p in provides_raw.split(',') {
-                let p = p.trim();
-                if !p.is_empty() {
-                    let name = p.split_whitespace().next().unwrap_or(p);
-                    provides.push(Capability::Feature(name.to_string()));
-                }
-            }
-        }
+        // Preserve virtual shared-library capabilities from the control
+        // metadata.  A `Provides: libfoo.so.1` entry is a library capability,
+        // not an unrelated feature token; this is what permits a verified
+        // consumer from another ecosystem to reuse the selected provider.
+        let (mut provides, versioned_provides) = Self::parse_provides(&fields);
         let mut seen_paths = HashSet::new();
 
         let data_entries = data_tar.entries().map_err(|e| {
@@ -644,6 +649,7 @@ impl ArtifactAdapter for DebAdapter {
             dependencies,
             constraints,
             provides,
+            versioned_provides,
             scripts,
             entries,
             installed_size,
@@ -768,11 +774,12 @@ impl ArtifactAdapter for DebAdapter {
                 let link_name = symlink_target_opt
                     .ok_or_else(|| Error::MalformedArchive("Missing symlink target".into()))?;
 
-                Self::validate_symlink_target(&relative_path, &link_name, destination)?;
+                let sanitized_target =
+                    Self::validate_symlink_target(&relative_path, &link_name, destination)?;
 
                 // Materialize links only after all regular files, so archive order
                 // cannot redirect writes through an earlier symlink.
-                pending_links.push((relative_path.clone(), link_name));
+                pending_links.push((relative_path.clone(), sanitized_target));
                 extracted_files.push(relative_path);
             } else {
                 if file_size > limits.max_single_file_bytes {
@@ -881,5 +888,75 @@ mod tests {
                 .unwrap()
                 .contains("multiline description")
         );
+    }
+
+    #[test]
+    fn versioned_breaks_preserves_the_version_constraint() {
+        let fields = HashMap::from([(
+            "Breaks".to_string(),
+            "libvirt-clients (<< 10.6.0-2~)".to_string(),
+        )]);
+        let constraints = DebAdapter::parse_constraints(&fields);
+        assert!(matches!(
+            constraints.as_slice(),
+            [Constraint::Conflict {
+                target,
+                version: VersionConstraint::Relational(VersionOp::Less, value),
+                ..
+            }] if target == "libvirt-clients" && value.as_str() == "10.6.0-2~"
+        ));
+    }
+
+    #[test]
+    fn test_sanitize_symlink_target_relativizes_absolute_targets() {
+        let staging = Path::new("/tmp/staging");
+
+        // 1. Cross-directory link like r-base-core
+        let res = super::super::sanitize_symlink_target(
+            Path::new("usr/lib/R/etc/Makeconf"),
+            Path::new("/etc/R/Makeconf"),
+            staging,
+        )
+        .unwrap();
+        assert_eq!(res, PathBuf::from("../../../../etc/R/Makeconf"));
+
+        // 2. Same-directory link
+        let res2 = super::super::sanitize_symlink_target(
+            Path::new("usr/bin/foo"),
+            Path::new("/usr/bin/bar"),
+            staging,
+        )
+        .unwrap();
+        assert_eq!(res2, PathBuf::from("bar"));
+
+        // 3. Root-level link
+        let res3 = super::super::sanitize_symlink_target(
+            Path::new("lib64"),
+            Path::new("/usr/lib64"),
+            staging,
+        )
+        .unwrap();
+        assert_eq!(res3, PathBuf::from("usr/lib64"));
+    }
+
+    #[test]
+    fn test_sanitize_symlink_target_rejects_escaping_targets() {
+        let staging = Path::new("/tmp/staging");
+
+        // Absolute target trying to escape package root with ParentDir
+        let err1 = super::super::sanitize_symlink_target(
+            Path::new("usr/bin/evil"),
+            Path::new("/../../etc/shadow"),
+            staging,
+        );
+        assert!(matches!(err1, Err(Error::SecurityViolation(_))));
+
+        // Relative target trying to escape staging root
+        let err2 = super::super::sanitize_symlink_target(
+            Path::new("usr/bin/evil"),
+            Path::new("../../../../etc/shadow"),
+            staging,
+        );
+        assert!(matches!(err2, Err(Error::SecurityViolation(_))));
     }
 }

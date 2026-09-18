@@ -3,9 +3,13 @@
 use std::path::Path;
 
 use crate::activation::Activator;
+use crate::domain::contracts::{ArtifactEvidence, TrustEvidence};
+use crate::domain::package::PackageName;
 use crate::domain::plan::{BinaryActivation, InstallPlan, RemovePlan};
 use crate::error::{Error, Result};
 use crate::host::HostFacts;
+use crate::resolver::Resolver;
+use crate::resolver::evidence::HostEvidence;
 use crate::state::StateDatabase;
 use crate::store::StoreLayout;
 
@@ -25,6 +29,20 @@ impl Planner {
         profile: &str,
         is_dry_run: bool,
     ) -> Result<InstallPlan> {
+        Self::plan_install_with_replacements(artifact_path, layout, db, profile, is_dry_run, &[])
+    }
+
+    /// Plans an install while treating the listed installed package names as
+    /// replacements in the same transaction. This lets an upgrade resolve
+    /// versioned `Breaks`/`Conflicts` against the incoming generation.
+    pub fn plan_install_with_replacements(
+        artifact_path: &Path,
+        layout: &StoreLayout,
+        db: &StateDatabase,
+        profile: &str,
+        is_dry_run: bool,
+        replaced_packages: &[PackageName],
+    ) -> Result<InstallPlan> {
         StoreLayout::validate_profile(profile)?;
         let format = crate::format::detect_format(artifact_path)?;
         let adapter = crate::format::get_adapter(format);
@@ -39,8 +57,41 @@ impl Planner {
             });
         }
 
-        let store_id =
-            StoreLayout::compute_store_id(&package.digest, &package.name, &package.version);
+        // Resolve declared package/capability constraints before producing an
+        // install plan. The resolver receives only immutable snapshots and
+        // evidence derived from the host and pkg-owned installed payloads.
+        let mut resolved_dependencies = Vec::new();
+        if !package.constraints.is_empty() {
+            let mut host_evidence = HostEvidence::detect(&host);
+            let profile_lib_dir = layout.profile_lib_dir(profile);
+            if profile_lib_dir.is_dir()
+                && !host_evidence
+                    .library_search_paths
+                    .contains(&profile_lib_dir)
+            {
+                host_evidence
+                    .library_search_paths
+                    .push(profile_lib_dir.clone());
+            }
+            let installed = db.normalized_packages_for_profile(profile)?;
+            let resolution = Resolver::new(host_evidence)
+                .with_installed_packages(installed)
+                .with_repository_packages(db.normalized_remote_packages()?)
+                .with_replaced_packages(replaced_packages.iter().cloned())
+                .resolve(&package)
+                .map_err(Error::from)?;
+            resolved_dependencies = resolution.packages_to_install;
+        }
+
+        let store_id = StoreLayout::compute_derivation_id(
+            &package.digest,
+            &package.name,
+            &package.version,
+            &package.format.to_string(),
+            "normalizer-v1",
+            "recipes-v1",
+            layout.base_dir(),
+        );
         let target_store_dir = layout.store_object_dir(&store_id);
         layout.validate_store_path(&target_store_dir)?;
 
@@ -89,6 +140,40 @@ impl Planner {
 
         let ignored_scripts = package.scripts.iter().map(|s| s.name.clone()).collect();
 
+        let remote_by_digest = match db.remote_package_by_digest(package.digest.hex())? {
+            Some(remote) => Some(remote),
+            None => {
+                // Older snapshots stored the algorithm prefix alongside the
+                // hexadecimal digest.  Accept that canonical spelling too so
+                // provenance is not silently downgraded to local unsigned
+                // when reopening a compatible state database.
+                db.remote_package_by_digest(&package.digest.to_string())?
+            }
+        };
+        let artifact_evidence = remote_by_digest
+            .filter(|(remote, _)| {
+                remote.name == package.name.as_str()
+                    && remote.version == package.version.as_str()
+                    && remote.format == package.format.to_string()
+                    && remote.architecture == package.architecture.as_str()
+                    && remote.size_bytes == package.size_bytes
+            })
+            .map(|(remote, snapshot_id)| ArtifactEvidence {
+                schema_version: crate::domain::contracts::CONTRACT_SCHEMA_VERSION,
+                source: remote.url,
+                format: package.format,
+                architecture: package.architecture.clone(),
+                size_bytes: package.size_bytes,
+                digest: package.digest.clone(),
+                catalog_snapshot: Some(snapshot_id.clone()),
+                trust: TrustEvidence::Repository {
+                    repository_id: remote.repository_id,
+                    snapshot_id,
+                    metadata_verified: true,
+                },
+            })
+            .unwrap_or_else(|| ArtifactEvidence::local(artifact_path.to_string_lossy(), &package));
+
         Ok(InstallPlan {
             package,
             store_id,
@@ -98,6 +183,12 @@ impl Planner {
             host_libraries_verified: Vec::new(),
             missing_libraries: Vec::new(),
             is_dry_run,
+            artifact_evidence: Some(artifact_evidence),
+            payload_manifest: None,
+            adaptations: Vec::new(),
+            executions: Vec::new(),
+            runtimes: Vec::new(),
+            resolved_dependencies,
         })
     }
 

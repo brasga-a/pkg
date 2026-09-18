@@ -4,7 +4,9 @@
 //! such as chaotic-aur) by fetching `<repo>.db`, verifying detached OpenPGP signatures,
 //! and parsing `desc` metadata entries from the database tarball.
 
-use crate::domain::package::RemotePackage;
+use crate::domain::capability::Capability;
+use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstraint, VersionOp};
+use crate::domain::package::{PackageName, PackageVersion, RemotePackage, VersionedCapability};
 use crate::error::{Error, Result};
 use crate::repository::crypto::{bounded_response, verify_detached_signature};
 use flate2::read::GzDecoder;
@@ -35,6 +37,9 @@ pub fn parse_alpm_desc(desc_content: &str, base_package_url: &str) -> Option<Rem
     let mut digest = String::new();
     let mut size_bytes = 0u64;
     let mut filename = String::new();
+    let mut depends = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut provides = Vec::new();
 
     for line in desc_content.lines() {
         let trimmed = line.trim();
@@ -54,6 +59,9 @@ pub fn parse_alpm_desc(desc_content: &str, base_package_url: &str) -> Option<Rem
             Some("SHA256SUM") if digest.is_empty() => digest = trimmed.to_string(),
             Some("CSIZE") if size_bytes == 0 => size_bytes = trimmed.parse::<u64>().unwrap_or(0),
             Some("FILENAME") if filename.is_empty() => filename = trimmed.to_string(),
+            Some("DEPENDS") => depends.push(trimmed.to_string()),
+            Some("CONFLICTS") => conflicts.push(trimmed.to_string()),
+            Some("PROVIDES") => provides.push(trimmed.to_string()),
             _ => {}
         }
     }
@@ -68,6 +76,33 @@ pub fn parse_alpm_desc(desc_content: &str, base_package_url: &str) -> Option<Rem
         format!("{}/{}", base_package_url.trim_end_matches('/'), filename)
     };
 
+    let constraints: Vec<Constraint> = depends
+        .iter()
+        .filter_map(|raw| parse_alpm_constraint(raw))
+        .chain(conflicts.iter().map(|raw| parse_alpm_conflict(raw)))
+        .collect();
+    let mut unversioned_provides = Vec::new();
+    let mut versioned_provides = Vec::new();
+    for raw in provides {
+        let (name, version) = parse_alpm_provide(&raw);
+        let capability = if name.contains(".so") {
+            Capability::SharedLibrary(name)
+        } else {
+            Capability::Feature(name)
+        };
+        if let Some(version) = version {
+            let version = PackageVersion::new(version);
+            if version.validate().is_ok() {
+                versioned_provides.push(VersionedCapability {
+                    capability,
+                    version,
+                });
+                continue;
+            }
+        }
+        unversioned_provides.push(capability);
+    }
+
     Some(RemotePackage {
         repository_id: String::new(),
         name,
@@ -81,7 +116,100 @@ pub fn parse_alpm_desc(desc_content: &str, base_package_url: &str) -> Option<Rem
         digest,
         size_bytes,
         url,
+        constraints,
+        provides: unversioned_provides,
+        versioned_provides,
     })
+}
+
+fn parse_alpm_provide(raw: &str) -> (String, Option<String>) {
+    let raw = raw.trim();
+    for (token, _op) in [
+        (">=", VersionOp::GreaterEqual),
+        ("<=", VersionOp::LessEqual),
+        ("=", VersionOp::Exact),
+        (">", VersionOp::Greater),
+        ("<", VersionOp::Less),
+    ] {
+        if let Some((name, version)) = raw.split_once(token) {
+            let name = name.trim();
+            let version = version.trim();
+            if !name.is_empty() && !version.is_empty() {
+                return (name.to_string(), Some(version.to_string()));
+            }
+        }
+    }
+    (raw.to_string(), None)
+}
+
+fn parse_alpm_constraint(raw: &str) -> Option<Constraint> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (name, op, version) = [
+        (">=", VersionOp::GreaterEqual),
+        ("<=", VersionOp::LessEqual),
+        ("=", VersionOp::Exact),
+        (">", VersionOp::Greater),
+        ("<", VersionOp::Less),
+    ]
+    .into_iter()
+    .find_map(|(token, op)| {
+        raw.split_once(token)
+            .map(|(name, version)| (name.trim(), Some(op), version.trim()))
+    })
+    .unwrap_or((raw, None, ""));
+    let version_constraint = op
+        .zip((!version.is_empty()).then(|| PackageVersion::new(version)))
+        .map(|(op, version)| VersionConstraint::Relational(op, version))
+        .unwrap_or(VersionConstraint::Any);
+    if name.contains(".so") {
+        Some(Constraint::Capability(CapabilityConstraint {
+            identifier: format!("lib:{name}"),
+            version: version_constraint,
+            original_expression: raw.to_string(),
+        }))
+    } else if let Ok(package) = PackageName::new(name) {
+        Some(Constraint::Package {
+            name: package,
+            version: version_constraint,
+            ecosystem: "alpm".into(),
+            original_expression: raw.to_string(),
+        })
+    } else {
+        Some(Constraint::Capability(CapabilityConstraint {
+            identifier: format!("feature:{name}"),
+            version: version_constraint,
+            original_expression: raw.to_string(),
+        }))
+    }
+}
+
+fn parse_alpm_conflict(raw: &str) -> Constraint {
+    let raw = raw.trim();
+    let (target, version) = [
+        (">=", VersionOp::GreaterEqual),
+        ("<=", VersionOp::LessEqual),
+        ("=", VersionOp::Exact),
+        (">", VersionOp::Greater),
+        ("<", VersionOp::Less),
+    ]
+    .into_iter()
+    .find_map(|(token, op)| {
+        raw.split_once(token).map(|(target, version)| {
+            (
+                target.trim().to_string(),
+                VersionConstraint::Relational(op, PackageVersion::new(version.trim())),
+            )
+        })
+    })
+    .unwrap_or_else(|| (raw.to_string(), VersionConstraint::Any));
+    Constraint::Conflict {
+        target,
+        version,
+        original_expression: raw.to_string(),
+    }
 }
 
 /// Parses an ALPM database tarball from raw bytes into a list of normalized `RemotePackage` entities.
@@ -308,5 +436,14 @@ x86_64
             packages[0].url,
             "https://geo.mirror.pkgbuild.com/core/os/x86_64/curl-8.10.1-1-x86_64.pkg.tar.zst"
         );
+    }
+
+    #[test]
+    fn parse_alpm_desc_preserves_versioned_provides() {
+        let desc = "%NAME%\nprovider\n\n%VERSION%\n1.0-1\n\n%ARCH%\nx86_64\n\n%FILENAME%\nprovider.pkg.tar.zst\n\n%PROVIDES%\nvirtual-api=2.4\nunversioned-api\n";
+        let package = parse_alpm_desc(desc, "https://example.invalid/core").unwrap();
+        assert_eq!(package.provides.len(), 1);
+        assert_eq!(package.versioned_provides.len(), 1);
+        assert_eq!(package.versioned_provides[0].version.as_str(), "2.4");
     }
 }

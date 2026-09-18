@@ -89,3 +89,38 @@ fn install_does_not_fall_back_to_a_substring_match() {
         .failure()
         .stderr(predicate::str::contains("not found"));
 }
+
+#[test]
+fn test_repository_sync_and_package_update_cli_behavior() {
+    let mut help_cmd = Command::cargo_bin("pkg").expect("pkg binary should exist");
+    help_cmd
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sync"))
+        .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("Resolve and apply newer versions"));
+
+    let temp = tempdir().expect("temporary data directory should be created");
+    let mut update_cmd = Command::cargo_bin("pkg").expect("pkg binary should exist");
+    update_cmd
+        .args([
+            "--data-dir",
+            temp.path()
+                .to_str()
+                .expect("temporary path should be UTF-8"),
+            "update",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No upgrades available"));
+
+    let mut repo_help_cmd = Command::cargo_bin("pkg").expect("pkg binary should exist");
+    repo_help_cmd
+        .args(["repo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sync"))
+        .stdout(predicate::str::contains("Synchronize repository metadata"));
+}

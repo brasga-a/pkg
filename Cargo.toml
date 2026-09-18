@@ -4,6 +4,7 @@ members = [
     "crates/pkg-cli",
     "crates/pkg-core",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0-beta.1"

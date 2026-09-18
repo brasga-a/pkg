@@ -4,7 +4,9 @@
 //! `repodata/repomd.xml`, validating integrity and cryptographic signatures, and streaming
 //! `primary.xml.gz` package definitions into normalized `RemotePackage` entities.
 
-use crate::domain::package::RemotePackage;
+use crate::domain::capability::Capability;
+use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstraint, VersionOp};
+use crate::domain::package::{PackageName, PackageVersion, RemotePackage, VersionedCapability};
 use crate::error::{Error, Result};
 use crate::repository::crypto::{bounded_response, verify_detached_signature};
 use flate2::read::GzDecoder;
@@ -151,6 +153,11 @@ pub fn parse_primary_xml<R: BufRead>(
     let mut is_cur_pkgid = false;
     let mut cur_size = 0u64;
     let mut cur_href = String::new();
+    let mut in_requires = false;
+    let mut in_provides = false;
+    let mut cur_constraints: Vec<Constraint> = Vec::new();
+    let mut cur_provides: Vec<Capability> = Vec::new();
+    let mut cur_versioned_provides: Vec<VersionedCapability> = Vec::new();
 
     loop {
         match xml_reader.read_event_into(&mut buf) {
@@ -167,6 +174,11 @@ pub fn parse_primary_xml<R: BufRead>(
                     is_cur_pkgid = false;
                     cur_size = 0;
                     cur_href.clear();
+                    in_requires = false;
+                    in_provides = false;
+                    cur_constraints.clear();
+                    cur_provides.clear();
+                    cur_versioned_provides.clear();
                 }
                 b"name" if in_package => in_name = true,
                 b"arch" if in_package => in_arch = true,
@@ -208,6 +220,22 @@ pub fn parse_primary_xml<R: BufRead>(
                         }
                     }
                 }
+                b"requires" if in_package => in_requires = true,
+                b"provides" if in_package => in_provides = true,
+                b"entry" if in_package => {
+                    // Fedora's primary.xml commonly emits dependency entries
+                    // as regular start/end elements instead of self-closing
+                    // tags.  Parse both forms so dependency metadata is not
+                    // silently dropped.
+                    parse_rpm_entry(
+                        &e,
+                        in_requires,
+                        in_provides,
+                        &mut cur_constraints,
+                        &mut cur_provides,
+                        &mut cur_versioned_provides,
+                    );
+                }
                 _ => {}
             },
             Ok(Event::Empty(e)) => {
@@ -244,6 +272,16 @@ pub fn parse_primary_xml<R: BufRead>(
                                     cur_href = String::from_utf8_lossy(&attr.value).to_string();
                                 }
                             }
+                        }
+                        b"entry" => {
+                            parse_rpm_entry(
+                                &e,
+                                in_requires,
+                                in_provides,
+                                &mut cur_constraints,
+                                &mut cur_provides,
+                                &mut cur_versioned_provides,
+                            );
                         }
                         _ => {}
                     }
@@ -302,12 +340,17 @@ pub fn parse_primary_xml<R: BufRead>(
                             digest: cur_checksum.clone(),
                             size_bytes: cur_size,
                             url: package_url,
+                            constraints: cur_constraints.clone(),
+                            provides: cur_provides.clone(),
+                            versioned_provides: cur_versioned_provides.clone(),
                         });
                     }
                 }
                 b"name" => in_name = false,
                 b"arch" => in_arch = false,
                 b"checksum" => in_checksum = false,
+                b"requires" => in_requires = false,
+                b"provides" => in_provides = false,
                 _ => {}
             },
             Err(e) => return Err(Error::Parse(format!("Failed to parse primary.xml: {e}"))),
@@ -317,6 +360,105 @@ pub fn parse_primary_xml<R: BufRead>(
     }
 
     Ok(packages)
+}
+
+fn parse_rpm_entry(
+    event: &quick_xml::events::BytesStart<'_>,
+    in_requires: bool,
+    in_provides: bool,
+    constraints: &mut Vec<Constraint>,
+    provides: &mut Vec<Capability>,
+    versioned_provides: &mut Vec<VersionedCapability>,
+) {
+    let mut name = None;
+    let mut flags = None;
+    let mut version = None;
+    for attr in event.attributes().flatten() {
+        let value = String::from_utf8_lossy(&attr.value).to_string();
+        match attr.key.as_ref() {
+            b"name" => name = Some(value),
+            b"flags" => flags = Some(value),
+            b"ver" => version = Some(value),
+            b"rel" => {
+                if let Some(existing) = version.as_mut() {
+                    existing.push('-');
+                    existing.push_str(&value);
+                } else {
+                    version = Some(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(name) = name else { return };
+    if in_provides {
+        let capability = if name.contains(".so") {
+            Capability::SharedLibrary(name)
+        } else {
+            Capability::Feature(name)
+        };
+        if let Some(version) = version.filter(|value| !value.is_empty()) {
+            let version = PackageVersion::new(version);
+            if version.validate().is_ok() {
+                versioned_provides.push(VersionedCapability {
+                    capability,
+                    version,
+                });
+                return;
+            }
+        }
+        provides.push(capability);
+        return;
+    }
+    if !in_requires {
+        return;
+    }
+    let version_constraint = match (flags.as_deref(), version) {
+        (Some("EQ"), Some(v)) => {
+            VersionConstraint::Relational(VersionOp::Exact, PackageVersion::new(v))
+        }
+        (Some("GE"), Some(v)) => {
+            VersionConstraint::Relational(VersionOp::GreaterEqual, PackageVersion::new(v))
+        }
+        (Some("GT"), Some(v)) => {
+            VersionConstraint::Relational(VersionOp::Greater, PackageVersion::new(v))
+        }
+        (Some("LE"), Some(v)) => {
+            VersionConstraint::Relational(VersionOp::LessEqual, PackageVersion::new(v))
+        }
+        (Some("LT"), Some(v)) => {
+            VersionConstraint::Relational(VersionOp::Less, PackageVersion::new(v))
+        }
+        _ => VersionConstraint::Any,
+    };
+    let original = name.clone();
+    if name.contains(".so") {
+        constraints.push(Constraint::Capability(CapabilityConstraint {
+            identifier: format!("lib:{name}"),
+            version: version_constraint,
+            original_expression: original,
+        }));
+    } else if name.starts_with('/') {
+        let binary = name.rsplit('/').next().unwrap_or(&name);
+        constraints.push(Constraint::Capability(CapabilityConstraint {
+            identifier: format!("bin:{binary}"),
+            version: version_constraint,
+            original_expression: name,
+        }));
+    } else if let Ok(package) = PackageName::new(&name) {
+        constraints.push(Constraint::Package {
+            name: package,
+            version: version_constraint,
+            ecosystem: "rpm".into(),
+            original_expression: original,
+        });
+    } else {
+        constraints.push(Constraint::Capability(CapabilityConstraint {
+            identifier: format!("feature:{name}"),
+            version: version_constraint,
+            original_expression: original,
+        }));
+    }
 }
 
 /// Fetches and verifies an RPM-MD repository, producing normalized RemotePackages.
@@ -494,5 +636,30 @@ mod tests {
         assert_eq!(pkgs[1].name, "libcurl");
         assert_eq!(pkgs[1].version, "1:8.9.1-1.fc41");
         assert_eq!(pkgs[1].architecture, "noarch");
+    }
+
+    #[test]
+    fn primary_xml_preserves_versioned_provides() {
+        let xml = r#"<metadata>
+  <package type="rpm">
+    <name>provider</name>
+    <arch>x86_64</arch>
+    <version epoch="0" ver="1.0" rel="1"/>
+    <checksum type="sha256" pkgid="YES">aaaaaaaa</checksum>
+    <size package="10"/>
+    <location href="Packages/p/provider.rpm"/>
+    <format><provides><entry name="virtual-api" flags="EQ" ver="2.4"/><entry name="unversioned-api"/></provides></format>
+  </package>
+</metadata>"#;
+        let packages = parse_primary_xml(
+            Cursor::new(xml.as_bytes()),
+            "x86_64",
+            "https://example.invalid",
+        )
+        .unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].provides.len(), 1);
+        assert_eq!(packages[0].versioned_provides.len(), 1);
+        assert_eq!(packages[0].versioned_provides[0].version.as_str(), "2.4");
     }
 }

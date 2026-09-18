@@ -16,7 +16,7 @@ A documentação está dividida nos seguintes módulos detalhados:
    - Ciclo de vida transacional, modelo de recuperação de falhas (crash resilience) e invariantes de segurança.
 
 2. [**Referência da CLI (Manual de Comandos)**](cli-reference.md)
-   - Guia prático de todos os comandos implementados: `install`, `remove`, `list`, `info`, `update`, `search`, `repo`.
+   - Guia prático de todos os comandos implementados: `install`, `remove`, `list`, `info`, `sync`, `search`, `repo`.
    - Modos de simulação (`--dry-run`), gestão de perfis (`--profile`) e flags globais.
 
 3. [**Catálogo Remoto e Confiança Criptográfica (M2)**](repositories-and-trust.md)
@@ -30,7 +30,22 @@ A documentação está dividida nos seguintes módulos detalhados:
 
 5. [**Benchmarks e Performance**](benchmarks.md)
    - Metodologia de teste, suíte de benchmarks automatizada com `hyperfine` e fallback Python.
-   - Análise de por que a instalação com `pkg` é quase instantânea em comparação ao `apt`.
+   - Metodologia e limites das comparações de desempenho.
+
+6. [**Plano de implementação do install**](install-implementation-plan.md)
+   - Plano proposto para ambientes por comando, resolução de bibliotecas, publicação por geração e migração, com critérios de aceite.
+
+7. [**Matriz de suporte executável**](support-matrix.md) e [**baseline de desempenho**](benchmark-baseline-2026-09-17.md)
+   - Combinações verificadas e medições reproduzíveis do host de desenvolvimento.
+
+8. [**Revisão de segurança v1**](../context/reports/2026-09-17-v1-security-review.md)
+   - Escopo, evidências e riscos residuais da instalação rootless.
+
+9. [**Fuzzing**](fuzzing.md)
+   - Targets libFuzzer e corpus hostil para parsers e extração limitada.
+
+10. [**Plano de paralelização de update/upgrade**](update-upgrade-parallelization-plan.md)
+   - Aquisição concorrente com Tokio, expansão transitiva, limites e publicação serial por geração.
 
 ---
 
@@ -43,17 +58,25 @@ cargo build --release
 ```
 O executável final estará disponível em `target/release/pkg`.
 
-### 2. Adicionando ao `$PATH` (Opcional)
-Para usar o comando globalmente e permitir que os binários ativados sejam executados no terminal:
+### 2. Adicionando o `pkg` ao `$PATH` (Opcional)
+Para usar o gerenciador globalmente:
 
 ```bash
 # Adiciona o diretório do binário do pkg
 export PATH="$HOME/projects/pkg/target/release:$PATH"
 
-# Adiciona o profile padrão de execução de pacotes do pkg
-export PATH="$HOME/.local/share/pkg/profiles/default/bin:$PATH"
 ```
-*(Dica: adicione as linhas acima ao seu `~/.bashrc` ou `~/.zshrc`).*
+*(Dica: adicione a linha acima ao seu `~/.bashrc` ou `~/.zshrc`).*
+
+Os comandos instalados são executados pelo runtime registrado do perfil:
+
+```bash
+pkg run <comando> -- <argumentos>
+```
+
+O launcher por comando escolhe a closure de bibliotecas da geração ativa. Não
+é necessário exportar um `LD_LIBRARY_PATH` global nem misturar dependências de
+comandos diferentes no ambiente do shell.
 
 ### 3. Primeiros Comandos
 
@@ -62,7 +85,7 @@ export PATH="$HOME/.local/share/pkg/profiles/default/bin:$PATH"
 pkg repo list
 
 # 2. Atualizar o catálogo remoto e validar assinaturas
-pkg update
+pkg sync
 
 # 3. Buscar um pacote disponível
 pkg search ripgrep

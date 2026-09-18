@@ -99,4 +99,22 @@ fn test_preflight_and_install_options() {
         .profile_bin_dir("default")
         .join("missing-cmd");
     assert!(bin_path.exists());
+
+    let generation = engine.db().active_generation("default").unwrap().unwrap();
+    let generation_manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            engine
+                .layout()
+                .profile_generations_dir("default")
+                .join(generation.generation_id)
+                .join("manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        generation_manifest["verified"],
+        serde_json::Value::Bool(false)
+    );
+    assert!(engine.run_command("default", "missing-cmd", &[]).is_err());
 }

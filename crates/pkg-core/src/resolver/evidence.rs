@@ -64,7 +64,18 @@ impl HostEvidence {
         }
 
         // Detect common host executables
-        for bin in &["sh", "bash", "coreutils", "tar", "gzip"] {
+        for bin in &[
+            "sh",
+            "bash",
+            "coreutils",
+            "tar",
+            "gzip",
+            "python",
+            "python3",
+            "perl",
+            "ruby",
+            "node",
+        ] {
             if Path::new("/bin").join(bin).exists() || Path::new("/usr/bin").join(bin).exists() {
                 builder = builder.add_executable(bin);
             }
@@ -74,7 +85,30 @@ impl HostEvidence {
         for &dir in STANDARD_LIB_SEARCH_DIRS {
             let libc = Path::new(dir).join("libc.so.6");
             if libc.exists() {
-                builder = builder.add_library("libc.so.6", None, &[]);
+                let symbols = crate::host::elf::inspect_elf(&libc, None)
+                    .ok()
+                    .flatten()
+                    .map(|inspection| inspection.defined_symbol_versions)
+                    .unwrap_or_default();
+                // The host's libc package version is not exposed through a
+                // portable API, but glibc's exported symbol versions provide
+                // a conservative capability floor (for example GLIBC_2.34).
+                // Recording the highest numeric GLIBC symbol lets a Debian
+                // `libc6 (>= ...)` requirement use real ABI evidence instead
+                // of treating an unversioned host capability as a match.
+                let inferred_version = symbols
+                    .iter()
+                    .filter_map(|symbol| symbol.strip_prefix("GLIBC_"))
+                    .filter(|version| {
+                        version.split('.').all(|part| {
+                            !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())
+                        })
+                    })
+                    .max_by(|left, right| compare_numeric_version(left, right))
+                    .map(str::to_string);
+                let symbol_refs = symbols.iter().map(String::as_str).collect::<Vec<_>>();
+                builder =
+                    builder.add_library("libc.so.6", inferred_version.as_deref(), &symbol_refs);
                 break;
             }
         }
@@ -94,11 +128,50 @@ impl HostEvidence {
             return true;
         }
         for dir in &self.library_search_paths {
-            if dir.join(soname).exists() {
+            let candidate = dir.join(soname);
+            if host_library_matches_architecture(&candidate, &self.architecture) {
                 return true;
             }
         }
         false
+    }
+}
+
+fn host_library_matches_architecture(path: &Path, architecture: &Architecture) -> bool {
+    let Some(inspection) = crate::host::elf::inspect_elf(path, None).ok().flatten() else {
+        return false;
+    };
+    let abi = crate::host::elf::expected_elf_abi(architecture);
+    abi.is_none_or(|(machine, class_bits)| {
+        inspection.machine == machine && inspection.class_bits == class_bits
+    }) && inspection.little_endian
+}
+
+fn compare_numeric_version(left: &str, right: &str) -> std::cmp::Ordering {
+    let mut left_parts = left.split('.').map(|part| part.parse::<u64>().unwrap_or(0));
+    let mut right_parts = right
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(value)) => {
+                if value == 0 {
+                    continue;
+                }
+                return std::cmp::Ordering::Less;
+            }
+            (Some(value), None) => {
+                if value == 0 {
+                    continue;
+                }
+                return std::cmp::Ordering::Greater;
+            }
+            (Some(left), Some(right)) => match left.cmp(&right) {
+                std::cmp::Ordering::Equal => {}
+                ordering => return ordering,
+            },
+        }
     }
 }
 

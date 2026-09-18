@@ -10,6 +10,7 @@ Este diretório contém uma suíte completa de benchmarking para o `pkg`, permit
 benchmarks/
 ├── README.md             # Este guia completo de metodologia e execução
 ├── run.sh                # Script principal de execução dos testes
+├── run-gates.sh          # Baseline dos gates de parsing/solver/extraction/recovery
 ├── fallback_bench.py     # Executor de benchmark nativo em Python (quando hyperfine não estiver instalado)
 ├── plot.py               # Gerador de gráficos (gráfico ASCII no terminal e PNG com matplotlib)
 └── results/              # Pasta onde os relatórios (Markdown, JSON, PNG) são salvos
@@ -65,6 +66,19 @@ sudo true
 - `--runs <N>`: Número de repetições por comando (padrão: 15).
 - `--warmup <N>`: Número de rodadas de aquecimento descartadas (padrão: 3).
 - `--output-dir <DIR>`: Diretório para salvar os relatórios gerados (padrão: `benchmarks/results`).
+
+### 5. Baseline dos gates de release
+
+Para medir as categorias exigidas pelo Gate M5 com fixtures locais e raízes
+temporárias isoladas:
+
+```bash
+./benchmarks/run-gates.sh --runs 10 --warmup 2
+```
+
+O driver mede parsing de índice Debian, resolução, extração, publicação da
+ativação e recuperação de uma transação incompleta. Os resultados ficam em
+`benchmarks/results/gates/` e incluem JSON bruto e tabela Markdown.
 
 ---
 

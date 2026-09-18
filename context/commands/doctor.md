@@ -8,13 +8,15 @@ Inspect and explain inconsistencies in pkg-managed state.
 pkg doctor
 ```
 
-Optional future mode:
+Opt-in repair mode:
 
 ```bash
 pkg doctor --repair
 ```
 
-Automatic repair must be conservative and separately documented.
+Repair is conservative: it reconciles only known incomplete pkg transactions
+and then runs the same read-only checks. Unknown files, foreign paths and
+native package-manager state are never removed or rewritten automatically.
 
 ## Checks
 

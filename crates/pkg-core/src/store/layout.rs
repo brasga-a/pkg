@@ -1,10 +1,13 @@
 //! Isolated rootless store layout and directory management (ADR-003, ADR-014).
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::domain::contracts::RuntimeManifest;
 use crate::domain::package::{ArtifactDigest, PackageName, PackageVersion};
 use crate::error::{Error, Result};
+use sha2::{Digest, Sha256};
 
 /// Filesystem layout for pkg-owned isolated stores, profiles, and state.
 #[derive(Debug, Clone)]
@@ -76,6 +79,145 @@ impl StoreLayout {
         self.staging_root().join(transaction_id)
     }
 
+    /// Root for immutable per-command runtime manifests and views.
+    #[must_use]
+    pub fn runtimes_dir(&self) -> PathBuf {
+        self.base_dir.join("runtimes")
+    }
+
+    /// Directory for a single runtime identity.
+    #[must_use]
+    pub fn runtime_dir(&self, runtime_id: &str) -> PathBuf {
+        self.runtimes_dir()
+            .join(runtime_id.trim_start_matches("sha256:"))
+    }
+
+    /// Command-local loader view containing only the selected provider files.
+    #[must_use]
+    pub fn runtime_lib_dir(&self, runtime_id: &str) -> PathBuf {
+        self.runtime_dir(runtime_id).join("lib")
+    }
+
+    /// Materializes a runtime view as literal symlinks to exact providers.
+    pub fn materialize_runtime_view(
+        &self,
+        runtime_id: &str,
+        providers: &std::collections::BTreeMap<String, PathBuf>,
+    ) -> Result<std::collections::BTreeMap<String, PathBuf>> {
+        let id = runtime_id.trim_start_matches("sha256:");
+        Self::validate_component(id, "runtime id")?;
+        ensure_directory(&self.runtimes_dir())?;
+        ensure_directory(&self.runtime_dir(id))?;
+        let dir = self.runtime_lib_dir(id);
+        ensure_directory(&dir)?;
+        let mut view = std::collections::BTreeMap::new();
+        for (name, provider) in providers {
+            Self::validate_component(name, "runtime library name")?;
+            if !provider.exists() {
+                return Err(Error::IncompatibleHost(format!(
+                    "Selected runtime provider is unavailable: {}",
+                    provider.display()
+                )));
+            }
+            let destination = dir.join(name);
+            match fs::symlink_metadata(&destination) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    if fs::read_link(&destination)? != *provider {
+                        return Err(Error::SecurityViolation(format!(
+                            "Runtime provider collision: {}",
+                            destination.display()
+                        )));
+                    }
+                }
+                Ok(_) => {
+                    return Err(Error::SecurityViolation(format!(
+                        "Runtime view destination is not a symlink: {}",
+                        destination.display()
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+                    let temp = dir.join(format!(".{name}.{nonce}.tmp"));
+                    let _ = fs::remove_file(&temp);
+                    std::os::unix::fs::symlink(provider, &temp)?;
+                    fs::rename(temp, &destination)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            view.insert(name.clone(), destination);
+        }
+        Ok(view)
+    }
+
+    /// Writes an immutable runtime manifest exactly once.
+    pub fn write_runtime_manifest(&self, manifest: &RuntimeManifest) -> Result<PathBuf> {
+        let runtime_id = manifest.runtime_id.trim_start_matches("sha256:");
+        Self::validate_component(runtime_id, "runtime id")?;
+        ensure_directory(&self.runtimes_dir())?;
+        ensure_directory(&self.runtime_dir(runtime_id))?;
+        let dir = self.runtime_dir(runtime_id);
+        ensure_directory(&dir)?;
+        let path = dir.join("manifest.json");
+        let bytes = serde_json::to_vec_pretty(manifest)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(Error::SecurityViolation(format!(
+                    "Runtime manifest path is not a regular file: {}",
+                    path.display()
+                )));
+            }
+            Ok(_) => {
+                let existing = fs::read(&path)?;
+                if existing != bytes {
+                    return Err(Error::SecurityViolation(format!(
+                        "Runtime manifest identity collision: {}",
+                        path.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Use a transaction-local temporary file and a hard-link
+                // publication so a concurrent writer cannot replace an
+                // already published immutable manifest.
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let temp = dir.join(format!(".manifest.{}.{}.tmp", std::process::id(), nonce));
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temp)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                match fs::hard_link(&temp, &path) {
+                    Ok(()) => {
+                        fs::remove_file(temp)?;
+                    }
+                    Err(link_error) if link_error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        fs::remove_file(temp)?;
+                        let existing = fs::read(&path)?;
+                        if existing != bytes {
+                            return Err(Error::SecurityViolation(format!(
+                                "Runtime manifest identity collision: {}",
+                                path.display()
+                            )));
+                        }
+                    }
+                    Err(link_error) => {
+                        let _ = fs::remove_file(&temp);
+                        return Err(link_error.into());
+                    }
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(path)
+    }
+
     /// Validates identifiers used as one filesystem path component.
     pub fn validate_component(value: &str, label: &str) -> Result<()> {
         if value.is_empty()
@@ -125,6 +267,25 @@ impl StoreLayout {
     #[must_use]
     pub fn profiles_root(&self) -> PathBuf {
         self.base_dir.join("profiles")
+    }
+
+    /// Directory containing immutable generations for a profile.
+    #[must_use]
+    pub fn profile_generations_dir(&self, profile: &str) -> PathBuf {
+        self.profile_dir(profile).join("generations")
+    }
+
+    /// Current generation pointer for a profile.
+    #[must_use]
+    pub fn profile_current_path(&self, profile: &str) -> PathBuf {
+        self.profile_dir(profile).join("current")
+    }
+
+    /// Stable command directory exposed to users.  It is a symlink to the
+    /// selected generation's `bin` directory after generation publication.
+    #[must_use]
+    pub fn profile_bin_link(&self, profile: &str) -> PathBuf {
+        self.profile_dir(profile).join("bin")
     }
 
     /// Root directory for a specific profile (e.g. `default`).
@@ -178,12 +339,39 @@ impl StoreLayout {
         format!("{prefix}-{name}-{version}")
     }
 
+    /// Computes the realization identity from every input that can affect the
+    /// transformed tree.  The legacy helper above remains available for
+    /// callers that only need the historical display identifier.
+    #[must_use]
+    pub fn compute_derivation_id(
+        digest: &ArtifactDigest,
+        name: &PackageName,
+        version: &PackageVersion,
+        format: &str,
+        normalizer_version: &str,
+        recipe_version: &str,
+        embedded_prefix: &Path,
+    ) -> String {
+        let input = format!(
+            "artifact={digest}|name={name}|version={version}|format={format}|normalizer={normalizer_version}|recipes={recipe_version}|prefix={}",
+            embedded_prefix.display()
+        );
+        let digest = format!("{:x}", Sha256::digest(input.as_bytes()));
+        format!("{}-{name}-{version}", &digest[..16])
+    }
+
     /// Creates all necessary top-level layout directories if they do not exist.
     pub fn ensure_dirs(&self) -> Result<()> {
-        fs::create_dir_all(self.store_dir())?;
-        fs::create_dir_all(self.staging_root())?;
-        fs::create_dir_all(self.state_dir())?;
-        fs::create_dir_all(self.profiles_root())?;
+        // Every managed namespace must be a real directory.  In particular,
+        // rejecting a pre-existing symlink here prevents a later extraction,
+        // runtime publication, or database write from following it outside
+        // the configured root.
+        ensure_directory(&self.base_dir)?;
+        ensure_directory(&self.store_dir())?;
+        ensure_directory(&self.staging_root())?;
+        ensure_directory(&self.runtimes_dir())?;
+        ensure_directory(&self.state_dir())?;
+        ensure_directory(&self.profiles_root())?;
         Ok(())
     }
 
@@ -226,6 +414,33 @@ impl StoreLayout {
     /// Profile names are single path components, never filesystem paths.
     pub fn validate_profile(profile: &str) -> Result<()> {
         Self::validate_component(profile, "profile")
+    }
+}
+
+/// Creates a directory only when an existing path is a real directory.  This
+/// prevents a user-controlled symlink in the runtime namespace from redirecting
+/// writes outside the pkg root.
+pub(crate) fn ensure_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(Error::SecurityViolation(format!(
+                "Runtime path is not a directory: {}",
+                path.display()
+            )))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::SecurityViolation(format!(
+                    "Runtime path is not a directory: {}",
+                    path.display()
+                )));
+            }
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -294,5 +509,56 @@ mod tests {
         let ver = PackageVersion::new("14.1.0");
         let store_id = StoreLayout::compute_store_id(&digest, &name, &ver);
         assert_eq!(store_id, "abcdef123456-ripgrep-14.1.0");
+    }
+
+    #[test]
+    fn derivation_id_changes_when_recipe_or_prefix_changes() {
+        let digest = ArtifactDigest::sha256("abcdef1234567890");
+        let name = PackageName::new("tool").unwrap();
+        let version = PackageVersion::new("1.0");
+        let first = StoreLayout::compute_derivation_id(
+            &digest,
+            &name,
+            &version,
+            "deb",
+            "normalizer-v1",
+            "recipes-v1",
+            Path::new("/tmp/a"),
+        );
+        let second = StoreLayout::compute_derivation_id(
+            &digest,
+            &name,
+            &version,
+            "deb",
+            "normalizer-v1",
+            "recipes-v2",
+            Path::new("/tmp/a"),
+        );
+        let third = StoreLayout::compute_derivation_id(
+            &digest,
+            &name,
+            &version,
+            "deb",
+            "normalizer-v1",
+            "recipes-v1",
+            Path::new("/tmp/b"),
+        );
+        assert_ne!(first, second);
+        assert_ne!(first, third);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_dirs_rejects_symlinked_managed_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("pkg");
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("store")).unwrap();
+
+        let error = StoreLayout::new(&base).ensure_dirs().unwrap_err();
+        assert!(matches!(error, Error::SecurityViolation(_)));
+        assert!(outside.read_dir().unwrap().next().is_none());
     }
 }

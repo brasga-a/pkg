@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info>
+  <mime-type type="application/x-fixture-gui">
+    <comment>Fixture GUI document</comment>
+    <glob pattern="*.fixture"/>
+  </mime-type>
+</mime-info>

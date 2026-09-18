@@ -115,6 +115,9 @@ async fn test_engine_download_remote_with_progress() {
         digest: digest.clone(),
         size_bytes: payload_len,
         url: format!("{}/test.deb", server.url),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
 
     let last_bytes = Arc::new(AtomicU64::new(0));

@@ -7,6 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Core library types and foundation for pkg package manager"
+build = "build.rs"
 
 [lints]
 workspace = true

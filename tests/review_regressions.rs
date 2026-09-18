@@ -2,11 +2,13 @@
 mod common;
 
 use common::DebPackageBuilder;
+use pkg_core::activation::{Activator, GenerationManager};
 use pkg_core::error::Error;
 use pkg_core::format::deb::DebAdapter;
 use pkg_core::format::{ArtifactAdapter, ExtractionLimits};
 use pkg_core::lock::ProcessLock;
 use pkg_core::{Engine, StoreLayout};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Cursor, Read};
 use tempfile::tempdir;
@@ -210,7 +212,9 @@ fn shared_store_and_activations_survive_reinstall_and_profile_removal() {
     assert!(output.status.success());
     assert_eq!(output.stdout, b"ok\n");
     engine.remove("test", "second", false).unwrap();
-    assert!(!plan.target_store_dir.exists());
+    // The previous generation remains a rollback root, so its store closure
+    // stays available until an explicit retention policy removes that root.
+    assert!(plan.target_store_dir.exists());
 }
 
 #[test]
@@ -296,6 +300,191 @@ fn failed_upgrade_removes_new_activation_links_without_old_db_rows() {
 }
 
 #[test]
+fn failed_first_publication_restores_legacy_profile_state() {
+    let temp = tempdir().unwrap();
+    let layout = StoreLayout::new(temp.path().join("data"));
+    let engine = Engine::open(layout.clone()).unwrap();
+    let artifact = temp.path().join("first.deb");
+    DebPackageBuilder::new("first-failure")
+        .file("usr/bin/first-failure", b"#!/bin/sh\necho bad\n", 0o755)
+        .write_to(&artifact)
+        .unwrap();
+    let trigger_db = rusqlite::Connection::open(engine.layout().db_path()).unwrap();
+    trigger_db
+        .execute(
+            "CREATE TRIGGER injected_first_failure BEFORE INSERT ON store_objects BEGIN SELECT RAISE(FAIL, 'injected'); END",
+            [],
+        )
+        .unwrap();
+    assert!(engine.install(&artifact, "default", false).is_err());
+    drop(trigger_db);
+    drop(engine);
+    let engine = Engine::open(layout.clone()).unwrap();
+    assert!(engine.list("default").unwrap().is_empty());
+    assert!(
+        !layout
+            .profile_bin_dir("default")
+            .join("first-failure")
+            .exists()
+    );
+    assert!(engine.db().active_generation("default").unwrap().is_none());
+}
+
+#[test]
+fn interrupted_remove_restores_the_committed_generation_and_database_state() {
+    let temp = tempdir().unwrap();
+    let layout = StoreLayout::new(temp.path().join("data"));
+    let engine = Engine::open(layout.clone()).unwrap();
+    let artifact = temp.path().join("remove-recovery.deb");
+    DebPackageBuilder::new("remove-recovery")
+        .file(
+            "usr/bin/remove-recovery",
+            b"#!/bin/sh\nprintf 'recovered\\n'\n",
+            0o755,
+        )
+        .write_to(&artifact)
+        .unwrap();
+    engine.install(&artifact, "default", false).unwrap();
+    let plan = engine.plan_remove("remove-recovery", "default").unwrap();
+    let tx_id = "tx-remove-recovery";
+    engine
+        .db()
+        .record_transaction_start(
+            tx_id,
+            "remove",
+            "Planned",
+            "remove-recovery",
+            Some(&plan.store_id),
+            None,
+        )
+        .unwrap();
+    engine
+        .db()
+        .update_transaction_phase(tx_id, "Activating")
+        .unwrap();
+    GenerationManager::detach_active_bin(&layout, "default", tx_id).unwrap();
+    Activator::deactivate(&plan.binaries_to_remove, &plan.expected_targets).unwrap();
+    engine
+        .db()
+        .remove_package_from_profile("default", "remove-recovery")
+        .unwrap();
+    drop(engine);
+
+    let engine = Engine::open(layout.clone()).unwrap();
+    assert!(
+        engine
+            .get_installed_package("default", "remove-recovery")
+            .unwrap()
+            .is_some()
+    );
+    let output =
+        std::process::Command::new(layout.profile_bin_dir("default").join("remove-recovery"))
+            .output()
+            .unwrap();
+    assert_eq!(output.stdout, b"recovered\n");
+    assert!(
+        layout
+            .profile_dir("default")
+            .join("legacy-bin-recovery-tx-remove-recovery")
+            .is_dir()
+    );
+    assert!(
+        engine
+            .db()
+            .list_incomplete_transactions()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn interrupted_install_after_detach_restores_the_previous_generation() {
+    let temp = tempdir().unwrap();
+    let layout = StoreLayout::new(temp.path().join("data"));
+    let engine = Engine::open(layout.clone()).unwrap();
+    let artifact = temp.path().join("install-recovery.deb");
+    DebPackageBuilder::new("install-recovery")
+        .file(
+            "usr/bin/install-recovery",
+            b"#!/bin/sh\nprintf 'previous\\n'\n",
+            0o755,
+        )
+        .write_to(&artifact)
+        .unwrap();
+    engine.install(&artifact, "default", false).unwrap();
+    let tx_id = "tx-install-recovery";
+    engine
+        .db()
+        .record_transaction_start(
+            tx_id,
+            "install",
+            "Activating",
+            "install-recovery",
+            Some("new-install-object"),
+            None,
+        )
+        .unwrap();
+    GenerationManager::detach_active_bin(&layout, "default", tx_id).unwrap();
+    drop(engine);
+
+    let engine = Engine::open(layout.clone()).unwrap();
+    let output =
+        std::process::Command::new(layout.profile_bin_dir("default").join("install-recovery"))
+            .output()
+            .unwrap();
+    assert_eq!(output.stdout, b"previous\n");
+    assert!(
+        engine
+            .db()
+            .list_incomplete_transactions()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn rollback_restores_generation_state_and_command_view() {
+    let temp = tempdir().unwrap();
+    let layout = StoreLayout::new(temp.path().join("data"));
+    let engine = Engine::open(layout.clone()).unwrap();
+    let first = temp.path().join("first.deb");
+    let second = temp.path().join("second.deb");
+    DebPackageBuilder::new("rollback-test")
+        .version("1.0")
+        .file("usr/bin/rollback-test", b"#!/bin/sh\necho old\n", 0o755)
+        .write_to(&first)
+        .unwrap();
+    DebPackageBuilder::new("rollback-test")
+        .version("2.0")
+        .file("usr/bin/rollback-test", b"#!/bin/sh\necho new\n", 0o755)
+        .write_to(&second)
+        .unwrap();
+    engine.install(&first, "default", false).unwrap();
+    let first_generation = engine
+        .db()
+        .active_generation("default")
+        .unwrap()
+        .unwrap()
+        .generation_id;
+    engine.install(&second, "default", false).unwrap();
+    engine.rollback("default", Some(&first_generation)).unwrap();
+    assert_eq!(
+        engine
+            .get_installed_package("default", "rollback-test")
+            .unwrap()
+            .unwrap()
+            .version
+            .as_str(),
+        "1.0"
+    );
+    let output =
+        std::process::Command::new(layout.profile_bin_dir("default").join("rollback-test"))
+            .output()
+            .unwrap();
+    assert_eq!(output.stdout, b"old\n");
+}
+
+#[test]
 fn upgrade_removes_binaries_that_no_longer_exist() {
     let temp = tempdir().unwrap();
     let engine = Engine::open(StoreLayout::new(temp.path().join("data"))).unwrap();
@@ -322,6 +511,59 @@ fn upgrade_removes_binaries_that_no_longer_exist() {
             .exists()
     );
     assert!(engine.remove("test", "default", false).is_ok());
+}
+
+#[test]
+fn native_runtime_entrypoint_uses_recorded_command_contract() {
+    let temp = tempdir().unwrap();
+    let engine = Engine::open(StoreLayout::new(temp.path().join("data"))).unwrap();
+    let artifact = temp.path().join("runtime.deb");
+    DebPackageBuilder::new("runtime-entrypoint")
+        .file(
+            "usr/bin/runtime-entrypoint",
+            b"#!/bin/sh\nprintf '%s|%s\\n' \"$PKG_PROFILE_RUNTIME\" \"$1\"\n",
+            0o755,
+        )
+        .write_to(&artifact)
+        .unwrap();
+    engine.install(&artifact, "default", false).unwrap();
+    let status = engine
+        .run_command(
+            "default",
+            "runtime-entrypoint",
+            &[OsString::from("argument")],
+        )
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn legacy_profile_migration_is_marked_unverified() {
+    let temp = tempdir().unwrap();
+    let layout = StoreLayout::new(temp.path().join("data"));
+    layout.ensure_dirs().unwrap();
+    let legacy_bin = layout.profile_bin_dir("default");
+    fs::create_dir_all(&legacy_bin).unwrap();
+    let target = layout
+        .store_object_dir("legacy-object")
+        .join("usr/bin/tool");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::os::unix::fs::symlink(&target, legacy_bin.join("tool")).unwrap();
+
+    let engine = Engine::open(layout.clone()).unwrap();
+    let generation = engine.migrate_legacy_profile("default").unwrap();
+    let manifest_path = layout
+        .profile_generations_dir("default")
+        .join(generation)
+        .join("manifest.json");
+    let manifest: pkg_core::domain::contracts::ActivationGeneration =
+        serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    assert!(!manifest.verified);
+    assert_eq!(
+        fs::read_link(layout.profile_bin_link("default")).unwrap(),
+        std::path::PathBuf::from("current/bin")
+    );
 }
 
 #[test]
@@ -496,4 +738,23 @@ fn invalid_elf_and_missing_libraries_fail_before_promotion() {
                 .exists()
         );
     }
+}
+
+#[test]
+fn package_absolute_path_dependency_is_rejected_when_it_points_into_payload() {
+    let temp = tempdir().unwrap();
+    let artifact = temp.path().join("path-dependency.deb");
+    DebPackageBuilder::new("path-dependency")
+        .file(
+            "usr/bin/path-dependency",
+            elf_requiring("/opt/libpkg-path-dependency.so"),
+            0o755,
+        )
+        .file("opt/libpkg-path-dependency.so", b"not an elf", 0o755)
+        .write_to(&artifact)
+        .unwrap();
+    let engine = Engine::open(StoreLayout::new(temp.path().join("data"))).unwrap();
+    let error = engine.install(&artifact, "default", false).unwrap_err();
+    assert!(matches!(error, Error::IncompatibleHost(_)));
+    assert!(engine.list("default").unwrap().is_empty());
 }

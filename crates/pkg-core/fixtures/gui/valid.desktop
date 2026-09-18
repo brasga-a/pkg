@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Fixture GUI
+Comment=Rootless integration fixture
+Exec=fixture-gui %U
+Categories=Utility;

@@ -1,6 +1,7 @@
 # Architecture Decision Records
 
-All ADRs below are **Accepted** for the current proposal.
+All ADRs below are **Accepted** for the current proposal unless their own
+status says otherwise.
 
 | ADR | Decision |
 |---|---|
@@ -23,5 +24,6 @@ All ADRs below are **Accepted** for the current proposal.
 | [ADR-017](ADR-017-format-support-order.md) | Format support order. |
 | [ADR-018](ADR-018-explicit-host-integration.md) | Explicit host integration. |
 | [ADR-019](ADR-019-agent-first-architecture-and-mcp-integration.md) | Agent-first architecture and native MCP integration. |
+| [ADR-020](ADR-020-v1-scope-for-signing-and-store-identity.md) | Native signing and final store identity are explicitly outside v1. |
 
 `meta/decisions.md` is the topic/status/milestone ledger. If it disagrees with an ADR, resolve the documentation defect before implementation.

@@ -12,6 +12,7 @@
 pub mod evidence;
 pub mod explanation;
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
@@ -58,6 +59,7 @@ pub struct Resolver {
     host: HostEvidence,
     installed_packages: HashMap<PackageName, NormalizedPackage>,
     repository_packages: HashMap<PackageName, Vec<NormalizedPackage>>,
+    replaced_packages: HashSet<PackageName>,
 }
 
 impl Resolver {
@@ -67,6 +69,7 @@ impl Resolver {
             host,
             installed_packages: HashMap::new(),
             repository_packages: HashMap::new(),
+            replaced_packages: HashSet::new(),
         }
     }
 
@@ -86,6 +89,17 @@ impl Resolver {
                 .or_default()
                 .push(pkg);
         }
+        self
+    }
+
+    /// Marks installed package names that will be replaced by this
+    /// transaction. Their old records must not satisfy dependencies or
+    /// create conflicts while the replacement closure is planned.
+    pub fn with_replaced_packages<I>(mut self, packages: I) -> Self
+    where
+        I: IntoIterator<Item = PackageName>,
+    {
+        self.replaced_packages.extend(packages);
         self
     }
 
@@ -275,14 +289,10 @@ impl Resolver {
             let version_ok = match &cap.version {
                 VersionConstraint::Any => true,
                 VersionConstraint::Relational(_, _) => {
-                    if let Some(host_ver) = &evidence.version {
-                        // Host version matched using candidate host version
+                    evidence.version.as_ref().is_some_and(|host_ver| {
                         cap.version
                             .matches(host_ver.as_str(), VersionEcosystem::Debian)
-                    } else {
-                        // Host has unversioned library; if exact symbol requirements exist, check them
-                        true
-                    }
+                    })
                 }
             };
 
@@ -325,8 +335,17 @@ impl Resolver {
             }
         }
 
-        // 2. Check installed packages in store
-        for pkg in self.installed_packages.values() {
+        // 2. Check installed packages in store. HashMap iteration order is not
+        // stable, so sort candidates before selecting one. This keeps a
+        // capability resolution reproducible across processes and hosts.
+        let mut installed_candidates: Vec<&NormalizedPackage> = self
+            .installed_packages
+            .iter()
+            .filter(|(name, _)| !self.replaced_packages.contains(*name))
+            .map(|(_, package)| package)
+            .collect();
+        installed_candidates.sort_by(|a, b| package_candidate_cmp(a, b));
+        for pkg in installed_candidates {
             if self.package_provides_capability(pkg, cap) {
                 installed_satisfied.push(format!("{}:{cap}", pkg.name));
                 return Ok(());
@@ -340,36 +359,45 @@ impl Resolver {
             }
         }
 
-        // 4. Search repository candidates for a provider
-        for candidates in self.repository_packages.values() {
-            for candidate in candidates {
-                if self.package_provides_capability(candidate, cap) {
-                    if resolved_names.contains(&candidate.name) {
-                        return Ok(());
-                    }
-                    if in_progress.contains(&candidate.name) {
-                        // Cycle detected
-                        return Ok(());
-                    }
-
-                    in_progress.insert(candidate.name.clone());
-                    for sub_c in &candidate.constraints {
-                        self.resolve_constraint(
-                            candidate,
-                            sub_c,
-                            closure,
-                            host_satisfied,
-                            installed_satisfied,
-                            in_progress,
-                            resolved_names,
-                            chain,
-                        )?;
-                    }
-                    in_progress.remove(&candidate.name);
-                    resolved_names.insert(candidate.name.clone());
-                    closure.push(candidate.clone());
+        // 4. Search repository candidates for a provider. Flattening the map
+        // before sorting avoids depending on HashMap bucket order when multiple
+        // repositories provide the same capability.
+        let mut provider_candidates: Vec<&NormalizedPackage> = self
+            .repository_packages
+            .values()
+            .flat_map(|candidates| candidates.iter())
+            .collect();
+        provider_candidates.sort_by(|a, b| package_candidate_cmp(a, b));
+        for candidate in provider_candidates {
+            if !candidate.architecture.matches_host(&self.host.architecture) {
+                continue;
+            }
+            if self.package_provides_capability(candidate, cap) {
+                if resolved_names.contains(&candidate.name) {
                     return Ok(());
                 }
+                if in_progress.contains(&candidate.name) {
+                    // Cycle detected
+                    return Ok(());
+                }
+
+                in_progress.insert(candidate.name.clone());
+                for sub_c in &candidate.constraints {
+                    self.resolve_constraint(
+                        candidate,
+                        sub_c,
+                        closure,
+                        host_satisfied,
+                        installed_satisfied,
+                        in_progress,
+                        resolved_names,
+                        chain,
+                    )?;
+                }
+                in_progress.remove(&candidate.name);
+                resolved_names.insert(candidate.name.clone());
+                closure.push(candidate.clone());
+                return Ok(());
             }
         }
 
@@ -437,13 +465,39 @@ impl Resolver {
     ) -> Result<(), ResolutionError> {
         let current_id = format!("{}-{}", current_pkg.name, current_pkg.version);
 
+        // Interpreter adapters may intentionally use a host interpreter. This
+        // is capability evidence, not a general package-name equivalence: only
+        // the reviewed interpreter names and unconstrained requirements qualify.
+        if *version_constraint == VersionConstraint::Any
+            && matches!(
+                name.as_str(),
+                "python" | "python3" | "perl" | "ruby" | "node"
+            )
+        {
+            let interpreter_commands: &[&str] = match name.as_str() {
+                "python" | "python3" => &["python", "python3"],
+                other => &[other],
+            };
+            if interpreter_commands.iter().any(|command| {
+                self.host
+                    .provides_capability(&format!("bin:{command}"))
+                    .is_some()
+            }) {
+                installed_satisfied.push(format!("host:interpreter:{name}"));
+                resolved_names.insert(name.clone());
+                return Ok(());
+            }
+        }
+
         // Check if already in closure or resolved
         if resolved_names.contains(name) {
             return Ok(());
         }
 
         // Check installed packages
-        if let Some(installed) = self.installed_packages.get(name) {
+        if let Some(installed) = self.installed_packages.get(name)
+            && !self.replaced_packages.contains(name)
+        {
             let eco = match installed.format {
                 crate::domain::package::PackageFormat::Deb => VersionEcosystem::Debian,
                 crate::domain::package::PackageFormat::Rpm => VersionEcosystem::Rpm,
@@ -453,7 +507,7 @@ impl Resolver {
 
             if version_constraint.matches(installed.version.as_str(), eco) {
                 // Check ecosystem compatibility (INV-007)
-                let installed_eco = format!("{}", installed.format);
+                let installed_eco = package_ecosystem(installed.format);
                 if !ecosystem.is_empty() && installed_eco != ecosystem {
                     chain.add_step(
                         &current_id,
@@ -480,10 +534,21 @@ impl Resolver {
 
         // Search repository candidates
         let mut last_false_equivalence = None;
+        let mut last_arch_mismatch = None;
         let mut last_version_mismatch = None;
 
         if let Some(candidates) = self.repository_packages.get(name) {
-            for cand in candidates {
+            let mut ordered_candidates: Vec<&NormalizedPackage> = candidates.iter().collect();
+            ordered_candidates.sort_by(|a, b| package_candidate_cmp(a, b));
+            for cand in ordered_candidates {
+                if !cand.architecture.matches_host(&self.host.architecture) {
+                    last_arch_mismatch = Some(RejectionReason::ArchitectureMismatch {
+                        candidate: format!("{}-{}", cand.name, cand.version),
+                        package_arch: cand.architecture.to_string(),
+                        host_arch: self.host.architecture.to_string(),
+                    });
+                    continue;
+                }
                 let cand_eco = match cand.format {
                     crate::domain::package::PackageFormat::Deb => VersionEcosystem::Debian,
                     crate::domain::package::PackageFormat::Rpm => VersionEcosystem::Rpm,
@@ -491,7 +556,7 @@ impl Resolver {
                     _ => VersionEcosystem::Debian,
                 };
 
-                let format_str = format!("{}", cand.format);
+                let format_str = package_ecosystem(cand.format);
                 if !ecosystem.is_empty() && format_str != ecosystem {
                     last_false_equivalence = Some(RejectionReason::FalseEquivalence {
                         candidate: format!("{}-{}", cand.name, cand.version),
@@ -540,6 +605,12 @@ impl Resolver {
                     chain: chain.clone(),
                 });
             }
+            if let Some(reason) = last_arch_mismatch {
+                chain.add_step(&current_id, original_expr.to_string(), reason);
+                return Err(ResolutionError {
+                    chain: chain.clone(),
+                });
+            }
             if let Some(reason) = last_version_mismatch {
                 chain.add_step(&current_id, original_expr.to_string(), reason);
                 return Err(ResolutionError {
@@ -565,7 +636,17 @@ impl Resolver {
         pkg: &NormalizedPackage,
         cap: &CapabilityConstraint,
     ) -> bool {
-        for p in &pkg.provides {
+        let mut provided = pkg
+            .provides
+            .iter()
+            .map(|capability| (capability, None))
+            .collect::<Vec<_>>();
+        provided.extend(
+            pkg.versioned_provides
+                .iter()
+                .map(|entry| (&entry.capability, Some(entry.version.as_str()))),
+        );
+        for (p, provided_version) in provided {
             let matches_ident = match p {
                 Capability::SharedLibrary(so) => {
                     cap.identifier == format!("lib:{so}") || cap.identifier == *so
@@ -585,8 +666,14 @@ impl Resolver {
                     crate::domain::package::PackageFormat::Alpm => VersionEcosystem::Alpm,
                     _ => VersionEcosystem::Debian,
                 };
-                if cap.version.matches(pkg.version.as_str(), eco) {
-                    return true;
+                match (provided_version, &cap.version) {
+                    // An unversioned Provides entry proves only the existence
+                    // of the capability.  The package's own version is not a
+                    // version of the virtual capability and must not satisfy
+                    // a relational requirement accidentally.
+                    (None, VersionConstraint::Any) => return true,
+                    (Some(version), constraint) if constraint.matches(version, eco) => return true,
+                    _ => {}
                 }
             }
         }
@@ -601,22 +688,30 @@ impl Resolver {
     ) -> Result<(), ResolutionError> {
         let mut all_packages = vec![root];
         all_packages.extend(closure.iter());
+        let selected_package_names: HashSet<_> = all_packages
+            .iter()
+            .map(|package| package.name.clone())
+            .collect();
 
         for pkg in &all_packages {
             for constraint in &pkg.constraints {
                 if let Constraint::Conflict {
                     target,
+                    version,
                     original_expression,
                 } = constraint
                 {
                     // Check if any other package in closure or installed matches target
                     for other in &all_packages {
-                        if other.name.as_str() == target.as_str()
-                            || other.provides.iter().any(|p| match p {
-                                Capability::Feature(f) => f == target,
-                                _ => false,
-                            })
-                        {
+                        // A package's own metadata may mention its name (for
+                        // example a generated conflict expression).  That is
+                        // not a mutual conflict with another selected
+                        // package; only compare against a distinct node in
+                        // the planned closure.
+                        if std::ptr::eq(*other, *pkg) {
+                            continue;
+                        }
+                        if Self::conflict_matches(pkg, target, version, other) {
                             chain.add_step(
                                 format!("{}-{}", pkg.name, pkg.version),
                                 original_expression.clone(),
@@ -631,13 +726,18 @@ impl Resolver {
                         }
                     }
 
-                    for (inst_name, inst_pkg) in &self.installed_packages {
-                        if inst_name.as_str() == target.as_str()
-                            || inst_pkg.provides.iter().any(|p| match p {
-                                Capability::Feature(f) => f == target,
-                                _ => false,
-                            })
+                    for inst_pkg in self.installed_packages.values() {
+                        // Replaced records and any installed package selected
+                        // in this closure belong to the old generation. They
+                        // must not conflict with their incoming replacement.
+                        // This matters for a targeted upgrade whose required
+                        // dependency is itself upgraded in the same closure.
+                        if self.replaced_packages.contains(&inst_pkg.name)
+                            || selected_package_names.contains(&inst_pkg.name)
                         {
+                            continue;
+                        }
+                        if Self::conflict_matches(pkg, target, version, inst_pkg) {
                             chain.add_step(
                                 format!("{}-{}", pkg.name, pkg.version),
                                 original_expression.clone(),
@@ -655,6 +755,44 @@ impl Resolver {
             }
         }
         Ok(())
+    }
+
+    fn conflict_matches(
+        conflicting_package: &NormalizedPackage,
+        target: &str,
+        version: &VersionConstraint,
+        other: &NormalizedPackage,
+    ) -> bool {
+        let package_name_matches = other.name.as_str() == target;
+        let feature_matches = other.provides.iter().any(|provided| match provided {
+            Capability::Feature(feature) => feature == target,
+            _ => false,
+        });
+        if !package_name_matches && !feature_matches {
+            return false;
+        }
+
+        let ecosystem = match conflicting_package.format {
+            crate::domain::package::PackageFormat::Deb => VersionEcosystem::Debian,
+            crate::domain::package::PackageFormat::Rpm => VersionEcosystem::Rpm,
+            crate::domain::package::PackageFormat::Alpm => VersionEcosystem::Alpm,
+            crate::domain::package::PackageFormat::Tarball => VersionEcosystem::Debian,
+        };
+
+        if package_name_matches {
+            return version.matches(other.version.as_str(), ecosystem);
+        }
+        if *version == VersionConstraint::Any {
+            return true;
+        }
+
+        // A versioned conflict against a virtual capability requires explicit
+        // provider-version evidence. The package's own version is not a
+        // version of an unrelated virtual capability.
+        other.versioned_provides.iter().any(|provided| {
+            matches!(&provided.capability, Capability::Feature(feature) if feature == target)
+                && version.matches(provided.version.as_str(), ecosystem)
+        })
     }
 
     /// Verifies static ELF binary compatibility against host evidence and package closure (INV-009).
@@ -692,6 +830,8 @@ impl Resolver {
                 p.provides.iter().any(|c| match c {
                     Capability::SharedLibrary(s) => s == &missing,
                     _ => false,
+                }) || p.versioned_provides.iter().any(|entry| {
+                    matches!(&entry.capability, Capability::SharedLibrary(s) if s == &missing)
                 })
             });
 
@@ -713,6 +853,74 @@ impl Resolver {
         }
 
         Ok(())
+    }
+}
+
+/// Maps the normalized format name to the dependency ecosystem vocabulary
+/// retained by each adapter. Debian's source metadata uses `debian`, while the
+/// artifact enum displays the shorter `deb` label.
+fn package_ecosystem(format: crate::domain::package::PackageFormat) -> String {
+    match format {
+        crate::domain::package::PackageFormat::Deb => "debian".to_string(),
+        crate::domain::package::PackageFormat::Rpm => "rpm".to_string(),
+        crate::domain::package::PackageFormat::Alpm => "alpm".to_string(),
+        crate::domain::package::PackageFormat::Tarball => "tarball".to_string(),
+    }
+}
+
+/// Provides a total, reproducible ordering for package candidates.
+///
+/// Versions are compared with their native ecosystem comparator when the two
+/// candidates use the same format. Candidates from different formats do not
+/// have a meaningful cross-ecosystem version ordering, so the format and
+/// digest tie-breakers keep selection deterministic without coercing versions
+/// into SemVer (INV-008).
+fn package_candidate_cmp(a: &NormalizedPackage, b: &NormalizedPackage) -> Ordering {
+    let name_order = a.name.cmp(&b.name);
+    if name_order != Ordering::Equal {
+        return name_order;
+    }
+
+    if a.format == b.format {
+        let ecosystem = version_ecosystem(a.format);
+        let version_order = crate::domain::version::compare_versions(
+            b.version.as_str(),
+            a.version.as_str(),
+            ecosystem,
+        );
+        if version_order != Ordering::Equal {
+            return version_order;
+        }
+    } else {
+        let format_order = package_format_rank(a.format).cmp(&package_format_rank(b.format));
+        if format_order != Ordering::Equal {
+            return format_order;
+        }
+    }
+
+    // Keep the remaining ordering independent of repository insertion order.
+    let version_order = b.version.cmp(&a.version);
+    if version_order != Ordering::Equal {
+        return version_order;
+    }
+    a.digest.to_string().cmp(&b.digest.to_string())
+}
+
+fn package_format_rank(format: crate::domain::package::PackageFormat) -> u8 {
+    match format {
+        crate::domain::package::PackageFormat::Deb => 0,
+        crate::domain::package::PackageFormat::Rpm => 1,
+        crate::domain::package::PackageFormat::Alpm => 2,
+        crate::domain::package::PackageFormat::Tarball => 3,
+    }
+}
+
+fn version_ecosystem(format: crate::domain::package::PackageFormat) -> VersionEcosystem {
+    match format {
+        crate::domain::package::PackageFormat::Deb => VersionEcosystem::Debian,
+        crate::domain::package::PackageFormat::Rpm => VersionEcosystem::Rpm,
+        crate::domain::package::PackageFormat::Alpm => VersionEcosystem::Alpm,
+        crate::domain::package::PackageFormat::Tarball => VersionEcosystem::Debian,
     }
 }
 
@@ -740,6 +948,7 @@ mod tests {
             dependencies: Vec::new(),
             constraints,
             provides,
+            versioned_provides: Vec::new(),
             scripts: Vec::new(),
             entries: Vec::new(),
             installed_size: None,
@@ -868,6 +1077,7 @@ mod tests {
             PackageFormat::Deb,
             vec![Constraint::Conflict {
                 target: "ripgrep-legacy".to_string(),
+                version: VersionConstraint::Any,
                 original_expression: "Conflicts: ripgrep-legacy".to_string(),
             }],
             vec![],
@@ -878,5 +1088,245 @@ mod tests {
             err.chain
                 .has_rejection(|r| matches!(r, RejectionReason::Conflict { .. }))
         );
+    }
+
+    #[test]
+    fn versioned_conflict_only_rejects_matching_versions() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .build();
+        let installed = make_pkg(
+            "libvirt-clients",
+            "12.0.0-1",
+            PackageFormat::Deb,
+            vec![],
+            vec![],
+        );
+        let target = make_pkg(
+            "libvirt-common",
+            "12.0.0-1",
+            PackageFormat::Deb,
+            vec![Constraint::Conflict {
+                target: "libvirt-clients".into(),
+                version: VersionConstraint::Relational(
+                    VersionOp::Less,
+                    PackageVersion::new("10.6.0-2~"),
+                ),
+                original_expression: "libvirt-clients (<< 10.6.0-2~)".into(),
+            }],
+            vec![],
+        );
+
+        assert!(
+            Resolver::new(host)
+                .with_installed_packages(vec![installed])
+                .resolve(&target)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn upgrade_root_replaces_its_old_conflicting_generation() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .build();
+        let installed = make_pkg("root", "1.0", PackageFormat::Deb, vec![], vec![]);
+        let dependency = make_pkg(
+            "dependency",
+            "2.0",
+            PackageFormat::Deb,
+            vec![Constraint::Conflict {
+                target: "root".into(),
+                version: VersionConstraint::Relational(VersionOp::Less, PackageVersion::new("2.0")),
+                original_expression: "Breaks: root (<< 2.0)".into(),
+            }],
+            vec![],
+        );
+        let target = make_pkg(
+            "root",
+            "2.0",
+            PackageFormat::Deb,
+            vec![Constraint::Package {
+                name: PackageName::new("dependency").unwrap(),
+                version: VersionConstraint::Any,
+                ecosystem: "debian".into(),
+                original_expression: "dependency".into(),
+            }],
+            vec![],
+        );
+
+        let result = Resolver::new(host)
+            .with_installed_packages(vec![installed])
+            .with_repository_packages(vec![dependency])
+            .resolve(&target);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn upgrade_dependency_replaces_its_old_conflicting_generation() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .build();
+        let installed_client = make_pkg("client", "1.0", PackageFormat::Deb, vec![], vec![]);
+        let provider = make_pkg(
+            "provider",
+            "2.0",
+            PackageFormat::Deb,
+            vec![Constraint::Conflict {
+                target: "client".into(),
+                version: VersionConstraint::Relational(VersionOp::Less, PackageVersion::new("2.0")),
+                original_expression: "Breaks: client (<< 2.0)".into(),
+            }],
+            vec![],
+        );
+        let incoming_client = make_pkg("client", "2.0", PackageFormat::Deb, vec![], vec![]);
+        let target = make_pkg(
+            "root",
+            "2.0",
+            PackageFormat::Deb,
+            vec![
+                Constraint::Package {
+                    name: PackageName::new("provider").unwrap(),
+                    version: VersionConstraint::Any,
+                    ecosystem: "debian".into(),
+                    original_expression: "provider".into(),
+                },
+                Constraint::Package {
+                    name: PackageName::new("client").unwrap(),
+                    version: VersionConstraint::Relational(
+                        VersionOp::GreaterEqual,
+                        PackageVersion::new("2.0"),
+                    ),
+                    ecosystem: "debian".into(),
+                    original_expression: "client (>= 2.0)".into(),
+                },
+            ],
+            vec![],
+        );
+
+        let result = Resolver::new(host)
+            .with_installed_packages(vec![installed_client])
+            .with_repository_packages(vec![provider, incoming_client])
+            .resolve(&target);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn package_does_not_conflict_with_itself() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .build();
+        let target = make_pkg(
+            "self-conflicting",
+            "1.0.0",
+            PackageFormat::Deb,
+            vec![Constraint::Conflict {
+                target: "self-conflicting".into(),
+                version: VersionConstraint::Any,
+                original_expression: "Conflicts: self-conflicting".into(),
+            }],
+            vec![],
+        );
+
+        assert!(Resolver::new(host).resolve(&target).is_ok());
+    }
+
+    #[test]
+    fn versioned_provides_use_capability_version_and_selection_is_stable() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .build();
+        let old = make_pkg("libfeature", "1.0", PackageFormat::Deb, vec![], vec![]);
+        let mut old = old;
+        old.versioned_provides = vec![crate::domain::package::VersionedCapability {
+            capability: Capability::Feature("virtual-feature".into()),
+            version: PackageVersion::new("2.0"),
+        }];
+        let mut new = make_pkg("libfeature", "2.0", PackageFormat::Deb, vec![], vec![]);
+        new.versioned_provides = vec![crate::domain::package::VersionedCapability {
+            capability: Capability::Feature("virtual-feature".into()),
+            version: PackageVersion::new("3.0"),
+        }];
+        let target = make_pkg(
+            "consumer",
+            "1.0",
+            PackageFormat::Deb,
+            vec![Constraint::Capability(CapabilityConstraint {
+                identifier: "feature:virtual-feature".into(),
+                version: VersionConstraint::Relational(
+                    VersionOp::GreaterEqual,
+                    PackageVersion::new("2.5"),
+                ),
+                original_expression: "virtual-feature (>= 2.5)".into(),
+            })],
+            vec![],
+        );
+
+        let plan = Resolver::new(host)
+            .with_repository_packages(vec![new, old])
+            .resolve(&target);
+        let plan = plan.expect("versioned capability should be satisfied");
+        assert_eq!(plan.packages_to_install[0].version.as_str(), "2.0");
+    }
+
+    #[test]
+    fn unversioned_capability_does_not_satisfy_versioned_requirement() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .build();
+        let provider = make_pkg(
+            "libfeature",
+            "99.0",
+            PackageFormat::Deb,
+            vec![],
+            vec![Capability::Feature("virtual-feature".into())],
+        );
+        let target = make_pkg(
+            "consumer",
+            "1.0",
+            PackageFormat::Deb,
+            vec![Constraint::Capability(CapabilityConstraint {
+                identifier: "feature:virtual-feature".into(),
+                version: VersionConstraint::Relational(
+                    VersionOp::GreaterEqual,
+                    PackageVersion::new("2.0"),
+                ),
+                original_expression: "virtual-feature (>= 2.0)".into(),
+            })],
+            vec![],
+        );
+
+        let error = Resolver::new(host)
+            .with_repository_packages(vec![provider])
+            .resolve(&target)
+            .expect_err("unversioned Provides must not imply a capability version");
+        assert!(error.to_string().contains("No provider found"), "{error}");
+    }
+
+    #[test]
+    fn host_capability_without_version_does_not_satisfy_versioned_requirement() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .add_library("libc.so.6", None, &["GLIBC_2.38"])
+            .build();
+        let target = make_pkg(
+            "consumer",
+            "1.0",
+            PackageFormat::Deb,
+            vec![Constraint::Capability(CapabilityConstraint {
+                identifier: "lib:libc.so.6".into(),
+                version: VersionConstraint::Relational(
+                    VersionOp::GreaterEqual,
+                    PackageVersion::new("2.0"),
+                ),
+                original_expression: "libc6 (>= 2.0)".into(),
+            })],
+            vec![],
+        );
+
+        let error = Resolver::new(host)
+            .resolve(&target)
+            .expect_err("host evidence without a version is incomplete");
+        assert!(error.to_string().contains("does not satisfy"), "{error}");
     }
 }

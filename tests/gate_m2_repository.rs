@@ -53,6 +53,9 @@ fn test_repository_snapshot_atomic_commit_and_search() {
         digest: "abcdef1234567890".to_string(),
         size_bytes: 1024,
         url: "http://example.com/pool/main/t/test-tool_2.0.0_amd64.deb".to_string(),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
 
     // Commit snapshot into SQLite
@@ -109,6 +112,9 @@ fn remote_package(url: &str, digest: String, size: u64) -> RemotePackage {
         digest,
         size_bytes: size,
         url: url.into(),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     }
 }
 

@@ -14,6 +14,20 @@ Linux software distribution is fragmented across package formats, repository mod
 
 The project goal is to normalize **delivery and package management UX**, while preserving the technical boundaries that actually matter: ABI compatibility, lifecycle behavior, repository trust, file ownership and host integration.
 
+## Quick Install
+
+Install the latest release of `pkg` rootless into user-space:
+
+```bash
+curl -fsSL https://pkg.atlantic.sh/install | sh
+```
+
+Custom options:
+
+```bash
+curl -fsSL https://pkg.atlantic.sh/install | bash -s -- --dir ~/.local/bin --version 0.1.0-beta.1
+```
+
 ```bash
 pkg search ripgrep
 pkg install ripgrep
@@ -108,15 +122,24 @@ The planned command surface currently includes:
 ```text
 pkg install
 pkg remove
+pkg integrate <package>
+pkg deintegrate <package>
 pkg list
 pkg info
 pkg search
+pkg repo sync
 pkg update
 pkg upgrade
 pkg repo list
 pkg repo add
+pkg repo update # alias of pkg repo sync
 pkg doctor
 pkg gc
+pkg profile create <task>
+pkg profile list
+pkg profile drop <task>
+pkg query-command <command>
+pkg mcp
 ```
 
 Detailed behavior for each command lives in [`context/commands/`](context/commands/README.md).

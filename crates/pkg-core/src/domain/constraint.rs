@@ -34,9 +34,10 @@ impl fmt::Display for VersionOp {
 }
 
 /// Normalized version constraint requirement.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum VersionConstraint {
     /// Any version satisfies this requirement.
+    #[default]
     Any,
     /// Must satisfy the specified relational operator against the target version.
     Relational(VersionOp, PackageVersion),
@@ -110,6 +111,10 @@ pub enum Constraint {
     /// A capability or package that conflicts with this package.
     Conflict {
         target: String,
+        /// Optional version range of the conflicting package/capability.
+        /// `Any` preserves the traditional unversioned conflict semantics.
+        #[serde(default)]
+        version: VersionConstraint,
         original_expression: String,
     },
 }
@@ -133,7 +138,12 @@ impl fmt::Display for Constraint {
                     write!(f, "pkg:{name} ({version})")
                 }
             }
-            Self::Conflict { target, .. } => write!(f, "conflict:{target}"),
+            Self::Conflict {
+                target, version, ..
+            } if *version == VersionConstraint::Any => write!(f, "conflict:{target}"),
+            Self::Conflict {
+                target, version, ..
+            } => write!(f, "conflict:{target} ({version})"),
         }
     }
 }

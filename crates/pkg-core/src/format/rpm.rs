@@ -7,15 +7,15 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{Cursor, Read};
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use xz2::read::XzDecoder;
 
 use crate::domain::capability::{Capability, Dependency};
-use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstraint};
+use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstraint, VersionOp};
 use crate::domain::package::{
     Architecture, ArtifactDigest, LifecycleScript, NormalizedPackage, PackageEntry, PackageFormat,
-    PackageName, PackageVersion,
+    PackageName, PackageVersion, VersionedCapability,
 };
 use crate::error::{Error, Result};
 use crate::format::{ArtifactAdapter, ExtractionLimits, ExtractionReport};
@@ -25,6 +25,85 @@ use crate::format::{ArtifactAdapter, ExtractionLimits, ExtractionReport};
 pub struct RpmAdapter;
 
 impl RpmAdapter {
+    fn create_payload_dirs(root: &Path, relative: &Path) -> Result<()> {
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(Error::SecurityViolation(format!(
+                        "Non-directory RPM payload parent: {}",
+                        current.display()
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)?,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    fn check_link_does_not_escape(root: &Path, relative: &Path, target: &Path) -> Result<()> {
+        let link_path = root.join(relative);
+        let parent = link_path.parent().unwrap_or(root);
+        let mut current = if parent.exists() {
+            fs::canonicalize(parent)?
+        } else {
+            root.to_path_buf()
+        };
+        if !current.starts_with(root) {
+            return Err(Error::SecurityViolation(format!(
+                "RPM symlink parent escapes staging: {}",
+                relative.display()
+            )));
+        }
+        for component in target.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir => {
+                    return Err(Error::SecurityViolation(format!(
+                        "Absolute RPM symlink target rejected: {} -> {}",
+                        relative.display(),
+                        target.display()
+                    )));
+                }
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if current == root || !current.starts_with(root) {
+                        return Err(Error::SecurityViolation(format!(
+                            "Escaping RPM payload link: {}",
+                            relative.display()
+                        )));
+                    }
+                    current.pop();
+                }
+                Component::Normal(component) => {
+                    let next = current.join(component);
+                    if next.is_symlink() {
+                        if let Ok(canonical) = fs::canonicalize(&next) {
+                            if !canonical.starts_with(root) {
+                                return Err(Error::SecurityViolation(format!(
+                                    "Escaping RPM payload link: {}",
+                                    relative.display()
+                                )));
+                            }
+                            current = canonical;
+                            continue;
+                        }
+                    }
+                    current = next;
+                }
+            }
+        }
+        if !current.starts_with(root) {
+            return Err(Error::SecurityViolation(format!(
+                "Escaping RPM payload link: {}",
+                relative.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Creates a new RPM format adapter.
     #[must_use]
     pub fn new() -> Self {
@@ -89,7 +168,14 @@ impl RpmAdapter {
 
     /// Sanitizes an entry path from CPIO archive, rejecting absolute paths and traversal (INV-004).
     fn sanitize_relative_path(raw: &str) -> Result<PathBuf> {
-        let trimmed = raw.trim_start_matches('.').trim_start_matches('/');
+        // RPM CPIO payloads conventionally prefix names with `./`.  Remove
+        // that exact prefix while preserving meaningful dot components such
+        // as `.config`; stripping every leading dot or slash would turn
+        // `../escape` and `/etc/passwd` into apparently safe paths.
+        let mut trimmed = raw;
+        while let Some(rest) = trimmed.strip_prefix("./") {
+            trimmed = rest;
+        }
         let path = Path::new(trimmed);
         for comp in path.components() {
             match comp {
@@ -121,13 +207,33 @@ impl RpmAdapter {
         let mut entries_count = 0usize;
         let mut symlinks_count = 0usize;
         let mut seen_paths = HashSet::new();
+        let mut pending_links = Vec::new();
+
+        fs::create_dir_all(destination)?;
+
+        let skip_payload = |cursor: &mut Cursor<&[u8]>, size: u64| -> Result<()> {
+            let padding = (4 - (size % 4)) % 4;
+            let skip = size.checked_add(padding).ok_or_else(|| {
+                Error::LimitsExceeded("CPIO payload offset overflowed u64".into())
+            })?;
+            let end = cursor.position().checked_add(skip).ok_or_else(|| {
+                Error::LimitsExceeded("CPIO payload offset overflowed u64".into())
+            })?;
+            if end > cpio_bytes.len() as u64 {
+                return Err(Error::MalformedArchive("CPIO payload is truncated".into()));
+            }
+            cursor.set_position(end);
+            Ok(())
+        };
 
         loop {
             // Read 110-byte CPIO header
             let mut hdr_buf = [0u8; 110];
             if let Err(e) = cursor.read_exact(&mut hdr_buf) {
                 if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                    break;
+                    return Err(Error::MalformedArchive(
+                        "CPIO archive ended before TRAILER!!!".into(),
+                    ));
                 }
                 return Err(Error::MalformedArchive(format!(
                     "Failed to read CPIO header: {e}"
@@ -142,24 +248,36 @@ impl RpmAdapter {
                 )));
             }
 
-            let mode_hex = std::str::from_utf8(&hdr_buf[14..22]).unwrap_or("0");
-            let filesize_hex = std::str::from_utf8(&hdr_buf[54..62]).unwrap_or("0");
-            let namesize_hex = std::str::from_utf8(&hdr_buf[94..102]).unwrap_or("0");
-
-            let mode = u32::from_str_radix(mode_hex, 16).unwrap_or(0);
-            let filesize = u64::from_str_radix(filesize_hex, 16).unwrap_or(0);
-            let namesize = usize::from_str_radix(namesize_hex, 16).unwrap_or(0);
+            let parse_hex = |field: &[u8], label: &str| -> Result<u64> {
+                let value = std::str::from_utf8(field)
+                    .map_err(|_| Error::MalformedArchive(format!("Invalid CPIO {label} field")))?;
+                u64::from_str_radix(value, 16).map_err(|_| {
+                    Error::MalformedArchive(format!("Invalid CPIO {label} field: {value:?}"))
+                })
+            };
+            let mode = u32::try_from(parse_hex(&hdr_buf[14..22], "mode")?)
+                .map_err(|_| Error::MalformedArchive("CPIO mode overflows u32".into()))?;
+            let filesize = parse_hex(&hdr_buf[54..62], "file size")?;
+            let namesize = usize::try_from(parse_hex(&hdr_buf[94..102], "name size")?)
+                .map_err(|_| Error::LimitsExceeded("CPIO name size overflows usize".into()))?;
 
             if namesize == 0 {
-                break;
+                return Err(Error::MalformedArchive(
+                    "CPIO entry has an empty name".into(),
+                ));
+            }
+            if namesize > 1024 * 1024 {
+                return Err(Error::LimitsExceeded(
+                    "CPIO filename exceeds 1 MiB limit".into(),
+                ));
             }
 
             // Read filename
             let mut name_buf = vec![0u8; namesize];
             cursor.read_exact(&mut name_buf)?;
             let raw_name = std::str::from_utf8(&name_buf)
-                .unwrap_or("")
-                .trim_end_matches('\0');
+                .map_err(|_| Error::MalformedArchive("CPIO filename is not UTF-8".into()))?;
+            let raw_name = raw_name.strip_suffix('\0').unwrap_or(raw_name);
 
             // Align cursor to 4-byte boundary after header + name
             let name_pad = (4 - ((110 + namesize) % 4)) % 4;
@@ -169,6 +287,11 @@ impl RpmAdapter {
             }
 
             if raw_name == "TRAILER!!!" {
+                if filesize != 0 {
+                    return Err(Error::MalformedArchive(
+                        "CPIO TRAILER!!! has non-zero payload".into(),
+                    ));
+                }
                 break;
             }
 
@@ -187,7 +310,9 @@ impl RpmAdapter {
                 )));
             }
 
-            total_bytes += filesize;
+            total_bytes = total_bytes
+                .checked_add(filesize)
+                .ok_or_else(|| Error::LimitsExceeded("CPIO total size overflowed u64".into()))?;
             if total_bytes > limits.max_total_bytes {
                 return Err(Error::LimitsExceeded(format!(
                     "Total extracted bytes exceeded limit of {}",
@@ -198,10 +323,7 @@ impl RpmAdapter {
             let relative_path = Self::sanitize_relative_path(raw_name)?;
             if relative_path.as_os_str().is_empty() {
                 // Skip root or empty paths
-                let file_pad = (4 - (filesize % 4)) % 4;
-                let skip = filesize + file_pad;
-                let cur = cursor.position();
-                cursor.set_position(cur + skip);
+                skip_payload(&mut cursor, filesize)?;
                 continue;
             }
 
@@ -213,57 +335,105 @@ impl RpmAdapter {
             }
             seen_paths.insert(relative_path.clone());
 
-            let target_path = destination.join(&relative_path);
-            let is_dir = (mode & 0o170000) == 0o040000;
-            let is_symlink = (mode & 0o170000) == 0o120000;
+            let file_type = mode & 0o170000;
+            let is_dir = file_type == 0o040000;
+            let is_symlink = file_type == 0o120000;
+            let is_file = file_type == 0o100000;
+            if !is_dir && !is_symlink && !is_file {
+                return Err(Error::MalformedArchive(format!(
+                    "Unsupported CPIO payload entry type: {}",
+                    relative_path.display()
+                )));
+            }
 
             if is_dir {
-                fs::create_dir_all(&target_path)?;
-            } else if is_symlink {
-                let mut link_buf = vec![0u8; filesize as usize];
-                cursor.read_exact(&mut link_buf)?;
-                let link_target_str = std::str::from_utf8(&link_buf).unwrap_or("");
-                let link_target = Path::new(link_target_str);
-
-                // Reject escaping symlinks
-                if link_target.is_absolute() || link_target_str.contains("..") {
-                    return Err(Error::SecurityViolation(format!(
-                        "Unsafe symlink in RPM: {} -> {link_target_str}",
+                if filesize != 0 {
+                    return Err(Error::MalformedArchive(format!(
+                        "Directory has non-zero payload: {}",
                         relative_path.display()
                     )));
                 }
-
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
+                Self::create_payload_dirs(destination, &relative_path)?;
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(link_target, &target_path)?;
-                symlinks_count += 1;
-            } else {
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent)?;
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(
+                        destination.join(&relative_path),
+                        fs::Permissions::from_mode(mode & 0o7777),
+                    )?;
                 }
-                let mut file_buf = vec![0u8; filesize as usize];
+            } else if is_symlink {
+                let link_size = usize::try_from(filesize).map_err(|_| {
+                    Error::LimitsExceeded("CPIO symlink size overflows usize".into())
+                })?;
+                let mut link_buf = vec![0u8; link_size];
+                cursor.read_exact(&mut link_buf)?;
+                let link_target_str = std::str::from_utf8(&link_buf).map_err(|_| {
+                    Error::MalformedArchive("CPIO symlink target is not UTF-8".into())
+                })?;
+                let link_target_str = link_target_str
+                    .strip_suffix('\0')
+                    .unwrap_or(link_target_str);
+                if link_target_str.is_empty() {
+                    return Err(Error::MalformedArchive(format!(
+                        "Empty CPIO symlink target: {}",
+                        relative_path.display()
+                    )));
+                }
+                let link_target = Path::new(link_target_str);
+
+                let sanitized_target =
+                    super::sanitize_symlink_target(&relative_path, link_target, destination)?;
+                pending_links.push((relative_path.clone(), sanitized_target));
+                symlinks_count += 1;
+            } else if is_file {
+                if let Some(parent) = relative_path.parent() {
+                    Self::create_payload_dirs(destination, parent)?;
+                }
+                let file_size = usize::try_from(filesize)
+                    .map_err(|_| Error::LimitsExceeded("CPIO file size overflows usize".into()))?;
+                let mut file_buf = vec![0u8; file_size];
                 cursor.read_exact(&mut file_buf)?;
-                fs::write(&target_path, &file_buf)?;
+                let target_path = destination.join(&relative_path);
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target_path)?
+                    .write_all(&file_buf)?;
 
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     let file_mode = mode & 0o7777;
-                    let _ =
-                        fs::set_permissions(&target_path, fs::Permissions::from_mode(file_mode));
+                    fs::set_permissions(&target_path, fs::Permissions::from_mode(file_mode))?;
                 }
             }
 
             // Align cursor to 4-byte boundary after file data
             let file_pad = (4 - (filesize % 4)) % 4;
-            if file_pad > 0 && !is_symlink {
-                let mut pad = vec![0u8; file_pad as usize];
+            if file_pad > 0 {
+                let mut pad = vec![
+                    0u8;
+                    usize::try_from(file_pad).map_err(|_| {
+                        Error::LimitsExceeded("CPIO padding overflows usize".into())
+                    })?
+                ];
                 cursor.read_exact(&mut pad)?;
             }
 
             extracted_files.push(relative_path);
+        }
+
+        for (relative, target) in &pending_links {
+            if let Some(parent) = relative.parent() {
+                Self::create_payload_dirs(destination, parent)?;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, destination.join(relative))?;
+        }
+        let root = fs::canonicalize(destination)?;
+        for (relative, target) in &pending_links {
+            Self::check_link_does_not_escape(&root, relative, target)?;
         }
 
         Ok(ExtractionReport {
@@ -289,12 +459,16 @@ impl ArtifactAdapter for RpmAdapter {
 
         let digest = Self::compute_digest(path)?;
 
-        let raw_name = pkg.metadata.get_name().unwrap_or("").to_lowercase();
+        // Preserve the source spelling. RPM repositories legitimately use
+        // uppercase and underscore-containing names, and package identity is
+        // case-sensitive at the RPM layer.
+        let raw_name = pkg.metadata.get_name().unwrap_or("");
         let name = PackageName::new(raw_name)?;
 
         let raw_version = pkg.metadata.get_version().unwrap_or("0.0.0");
         let raw_release = pkg.metadata.get_release().unwrap_or("1");
         let version = PackageVersion::new(format!("{raw_version}-{raw_release}"));
+        version.validate()?;
 
         let raw_arch = pkg.metadata.get_arch().unwrap_or("x86_64");
         let architecture = Architecture::parse(raw_arch);
@@ -345,14 +519,28 @@ impl ArtifactAdapter for RpmAdapter {
 
         // Collect provides as capabilities (ADR-016)
         let mut provides = Vec::new();
+        let mut versioned_provides = Vec::new();
         if let Ok(prov_entries) = pkg.metadata.get_provides() {
             for prov in prov_entries {
                 let p_name = prov.name.as_str();
-                if p_name.ends_with(".so") || p_name.contains(".so.") {
-                    provides.push(Capability::SharedLibrary(p_name.to_string()));
+                let capability = if p_name.ends_with(".so") || p_name.contains(".so.") {
+                    Capability::SharedLibrary(p_name.to_string())
                 } else if !p_name.starts_with('/') {
-                    provides.push(Capability::Feature(p_name.to_string()));
+                    Capability::Feature(p_name.to_string())
+                } else {
+                    continue;
+                };
+                if !prov.version.is_empty() {
+                    let version = PackageVersion::new(prov.version.as_str());
+                    if version.validate().is_ok() {
+                        versioned_provides.push(VersionedCapability {
+                            capability,
+                            version,
+                        });
+                        continue;
+                    }
                 }
+                provides.push(capability);
             }
         }
 
@@ -368,18 +556,46 @@ impl ArtifactAdapter for RpmAdapter {
                     continue;
                 }
 
-                let raw = req.name.clone();
+                let comparator = req.flags.comparator_str();
+                let raw = if comparator.is_empty() || req.version.is_empty() {
+                    req.name.clone()
+                } else {
+                    format!("{} {} {}", req.name, comparator, req.version)
+                };
+                let version_constraint = match (comparator, req.version.is_empty()) {
+                    ("=", false) => VersionConstraint::Relational(
+                        VersionOp::Exact,
+                        PackageVersion::new(req.version.as_str()),
+                    ),
+                    (">", false) => VersionConstraint::Relational(
+                        VersionOp::Greater,
+                        PackageVersion::new(req.version.as_str()),
+                    ),
+                    (">=", false) => VersionConstraint::Relational(
+                        VersionOp::GreaterEqual,
+                        PackageVersion::new(req.version.as_str()),
+                    ),
+                    ("<", false) => VersionConstraint::Relational(
+                        VersionOp::Less,
+                        PackageVersion::new(req.version.as_str()),
+                    ),
+                    ("<=", false) => VersionConstraint::Relational(
+                        VersionOp::LessEqual,
+                        PackageVersion::new(req.version.as_str()),
+                    ),
+                    _ => VersionConstraint::Any,
+                };
                 dependencies.push(Dependency {
                     raw: raw.clone(),
                     name: req_name.to_string(),
-                    version_constraint: None,
+                    version_constraint: (!req.version.is_empty()).then(|| req.version.clone()),
                     ecosystem: "rpm".to_string(),
                 });
 
                 if req_name.ends_with(".so") || req_name.contains(".so.") {
                     constraints.push(Constraint::Capability(CapabilityConstraint {
                         identifier: format!("lib:{req_name}"),
-                        version: VersionConstraint::Any,
+                        version: version_constraint.clone(),
                         original_expression: raw,
                     }));
                 } else if req_name.starts_with('/') {
@@ -393,14 +609,14 @@ impl ArtifactAdapter for RpmAdapter {
                 } else if let Ok(pkg_name) = PackageName::new(req_name) {
                     constraints.push(Constraint::Package {
                         name: pkg_name,
-                        version: VersionConstraint::Any,
+                        version: version_constraint.clone(),
                         ecosystem: "rpm".to_string(),
                         original_expression: raw,
                     });
                 } else {
                     constraints.push(Constraint::Capability(CapabilityConstraint {
                         identifier: format!("feature:{req_name}"),
-                        version: VersionConstraint::Any,
+                        version: version_constraint,
                         original_expression: raw,
                     }));
                 }
@@ -409,9 +625,39 @@ impl ArtifactAdapter for RpmAdapter {
 
         if let Ok(conflicts) = pkg.metadata.get_conflicts() {
             for c in conflicts {
+                let comparator = c.flags.comparator_str();
+                let version = match (comparator, c.version.is_empty()) {
+                    ("=", false) => VersionConstraint::Relational(
+                        VersionOp::Exact,
+                        PackageVersion::new(c.version.as_str()),
+                    ),
+                    ("<", false) => VersionConstraint::Relational(
+                        VersionOp::Less,
+                        PackageVersion::new(c.version.as_str()),
+                    ),
+                    ("<=", false) => VersionConstraint::Relational(
+                        VersionOp::LessEqual,
+                        PackageVersion::new(c.version.as_str()),
+                    ),
+                    (">", false) => VersionConstraint::Relational(
+                        VersionOp::Greater,
+                        PackageVersion::new(c.version.as_str()),
+                    ),
+                    (">=", false) => VersionConstraint::Relational(
+                        VersionOp::GreaterEqual,
+                        PackageVersion::new(c.version.as_str()),
+                    ),
+                    _ => VersionConstraint::Any,
+                };
+                let original_expression = if comparator.is_empty() || c.version.is_empty() {
+                    c.name.clone()
+                } else {
+                    format!("{} {} {}", c.name, comparator, c.version)
+                };
                 constraints.push(Constraint::Conflict {
                     target: c.name.clone(),
-                    original_expression: c.name,
+                    version,
+                    original_expression,
                 });
             }
         }
@@ -424,6 +670,11 @@ impl ArtifactAdapter for RpmAdapter {
                 let clean_path = p.strip_prefix("/").unwrap_or(&p);
                 let is_dir = f.mode().file_type() == rpm::FileType::Dir;
                 let is_symlink = f.mode().file_type() == rpm::FileType::SymbolicLink;
+                let symlink_target = if is_symlink {
+                    f.linkto().map(PathBuf::from)
+                } else {
+                    None
+                };
 
                 // If executable in bin dir, add executable capability
                 if !is_dir && !is_symlink {
@@ -434,15 +685,27 @@ impl ArtifactAdapter for RpmAdapter {
                             }
                         }
                     }
+                    if let Some(filename) = clean_path.file_name().and_then(|n| n.to_str())
+                        && filename.contains(".so")
+                    {
+                        let capability = Capability::SharedLibrary(filename.to_string());
+                        if !provides.contains(&capability)
+                            && !versioned_provides
+                                .iter()
+                                .any(|entry| entry.capability == capability)
+                        {
+                            provides.push(capability);
+                        }
+                    }
                 }
 
                 entries.push(PackageEntry {
                     relative_path: clean_path.to_path_buf(),
                     is_dir,
                     is_symlink,
-                    symlink_target: None,
                     mode: f.mode().raw_mode() as u32,
                     size: f.size() as u64,
+                    symlink_target,
                 });
             }
         }
@@ -458,6 +721,7 @@ impl ArtifactAdapter for RpmAdapter {
             dependencies,
             constraints,
             provides,
+            versioned_provides,
             scripts,
             entries,
             installed_size,
@@ -476,5 +740,32 @@ impl ArtifactAdapter for RpmAdapter {
 
         let uncompressed_cpio = Self::decompress_payload(&pkg.payload)?;
         Self::extract_cpio_stream(&uncompressed_cpio, destination, limits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RpmAdapter;
+    use crate::error::Error;
+    use std::path::PathBuf;
+
+    #[test]
+    fn sanitize_relative_path_rejects_escape_and_preserves_dotfiles() {
+        assert!(matches!(
+            RpmAdapter::sanitize_relative_path("../escape"),
+            Err(Error::SecurityViolation(_))
+        ));
+        assert!(matches!(
+            RpmAdapter::sanitize_relative_path("/etc/passwd"),
+            Err(Error::SecurityViolation(_))
+        ));
+        assert_eq!(
+            RpmAdapter::sanitize_relative_path("./usr/bin/tool").unwrap(),
+            PathBuf::from("usr/bin/tool")
+        );
+        assert_eq!(
+            RpmAdapter::sanitize_relative_path(".config/app").unwrap(),
+            PathBuf::from(".config/app")
+        );
     }
 }

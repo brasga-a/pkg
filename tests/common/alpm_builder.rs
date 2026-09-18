@@ -14,6 +14,8 @@ pub struct AlpmPackageBuilder {
     conflicts: Vec<String>,
     install_script: Option<String>,
     files: Vec<(String, Vec<u8>, u32)>,
+    symlinks: Vec<(String, String)>,
+    directories: Vec<String>,
 }
 
 impl AlpmPackageBuilder {
@@ -29,6 +31,8 @@ impl AlpmPackageBuilder {
             conflicts: Vec::new(),
             install_script: None,
             files: Vec::new(),
+            symlinks: Vec::new(),
+            directories: Vec::new(),
         }
     }
 
@@ -74,6 +78,18 @@ impl AlpmPackageBuilder {
         self
     }
 
+    /// Adds an explicit directory entry to the payload.
+    pub fn directory(mut self, path: impl Into<String>) -> Self {
+        self.directories.push(path.into());
+        self
+    }
+
+    /// Adds a symbolic link entry to the payload.
+    pub fn symlink(mut self, path: impl Into<String>, target: impl Into<String>) -> Self {
+        self.symlinks.push((path.into(), target.into()));
+        self
+    }
+
     /// Builds and writes the `.pkg.tar.zst` archive to disk.
     pub fn write_to(&self, destination: &Path) -> std::io::Result<()> {
         let file = File::create(destination)?;
@@ -116,6 +132,15 @@ impl AlpmPackageBuilder {
         }
 
         // Payload files
+        for directory in &self.directories {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(directory.trim_start_matches('/'))?;
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append(&header, &[][..])?;
+        }
         for (rel_path, content, mode) in &self.files {
             let clean = rel_path.trim_start_matches('/');
             let mut header = tar::Header::new_gnu();
@@ -124,6 +149,17 @@ impl AlpmPackageBuilder {
             header.set_mode(*mode);
             header.set_cksum();
             tar.append(&header, content.as_slice())?;
+        }
+
+        for (rel_path, target) in &self.symlinks {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(rel_path.trim_start_matches('/'))?;
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_link_name(target)?;
+            header.set_cksum();
+            tar.append(&header, &[][..])?;
         }
 
         tar.finish()?;

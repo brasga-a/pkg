@@ -14,14 +14,14 @@ Para evitar os problemas de configurações em "caixa preta" e ao mesmo tempo ga
                ▼ (Edição manual ou `pkg repo add`)
     ~/.local/share/pkg/repositories.toml      <-- Fonte da Verdade (TOML transparente)
                │
-               ▼ (Comando: `pkg update`)
-     Validação Criptográfica GPG (InRelease)
-               │
-               ▼ (Commit atômico em transação SQLite)
-        ~/.local/share/pkg/state/pkg.db       <-- Snapshot Imutável Indexado
-               │
-               ▼ (Buscas instantâneas sub-milissegundo)
-      `pkg search` / `pkg install`
+                ▼ (Comando: `pkg repo sync`; aliases: `pkg sync`, `pkg repo update`)
+      Validação Criptográfica GPG (InRelease)
+                │
+                ▼ (Commit atômico em transação SQLite)
+         ~/.local/share/pkg/state/pkg.db       <-- Snapshot Imutável Indexado
+                │
+                ▼ (Buscas instantâneas sub-milissegundo)
+       `pkg search` / `pkg install`
 ```
 
 1. **`repositories.toml` (A Fonte da Verdade):**
@@ -29,7 +29,7 @@ Para evitar os problemas de configurações em "caixa preta" e ao mesmo tempo ga
    - Pode ser editado com qualquer editor de texto ou manipulado pelos comandos `pkg repo add` e `pkg repo list`.
 
 2. **SQLite Snapshots (Performance Turbo):**
-   - Ao executar `pkg update`, os metadados são descompactados e inseridos nas tabelas `repositories` e `remote_packages`.
+   - Ao executar `pkg repo sync` (ou um alias), os metadados são descompactados e inseridos nas tabelas `repositories` e `remote_packages`.
    - Comandos como `pkg search` ou o resolvedor de nomes de `pkg install` consultam exclusivamente o SQLite, garantindo respostas instantâneas sem overhead de parsing de texto ou tráfego de rede.
 
 ---

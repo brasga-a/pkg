@@ -1,6 +1,7 @@
 //! Host environment facts and architecture detection.
 
 pub mod elf;
+pub mod integration;
 
 use crate::domain::package::Architecture;
 
@@ -58,17 +59,81 @@ impl HostFacts {
     /// Parses os-release formatted text into (ID, ID_LIKE).
     #[must_use]
     pub fn parse_os_release_str(content: &str) -> (Option<String>, Option<String>) {
-        let mut id = None;
-        let mut id_like = None;
+        let values = Self::parse_os_release_values(content);
+        (values.get("ID").cloned(), values.get("ID_LIKE").cloned())
+    }
+
+    /// Parses all stable fields from os-release.  Keeping this separate from
+    /// the historical `(ID, ID_LIKE)` helper lets runtime manifests retain
+    /// release evidence without changing callers that construct `HostFacts`.
+    #[must_use]
+    pub fn parse_os_release_values(content: &str) -> std::collections::BTreeMap<String, String> {
+        let mut values = std::collections::BTreeMap::new();
         for line in content.lines() {
             let line = line.trim();
-            if let Some(val) = line.strip_prefix("ID=") {
-                id = Some(val.trim_matches('"').trim_matches('\'').to_lowercase());
-            } else if let Some(val) = line.strip_prefix("ID_LIKE=") {
-                id_like = Some(val.trim_matches('"').trim_matches('\'').to_lowercase());
+            let Some((key, raw)) = line.split_once('=') else {
+                continue;
+            };
+            if key.is_empty() {
+                continue;
+            }
+            let value = raw.trim_matches('"').trim_matches('\'').to_string();
+            if !value.is_empty() {
+                values.insert(key.to_string(), value.to_lowercase());
             }
         }
-        (id, id_like)
+        values
+    }
+
+    /// Returns release metadata suitable for persisting in a runtime
+    /// manifest, including ID, ID_LIKE, VERSION_ID and VERSION_CODENAME.
+    #[must_use]
+    pub fn release_metadata() -> std::collections::BTreeMap<String, String> {
+        for path in ["/etc/os-release", "/usr/lib/os-release"] {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let values = Self::parse_os_release_values(&content);
+                if !values.is_empty() {
+                    return values
+                        .into_iter()
+                        .filter(|(key, _)| {
+                            matches!(
+                                key.as_str(),
+                                "ID" | "ID_LIKE" | "VERSION_ID" | "VERSION_CODENAME"
+                            )
+                        })
+                        .map(|(key, value)| (format!("os_release_{key}"), value))
+                        .collect();
+                }
+            }
+        }
+        std::collections::BTreeMap::new()
+    }
+
+    /// Detects the host libc and dynamic loader from the running executable
+    /// without invoking any payload or external command.
+    #[must_use]
+    pub fn loader_metadata() -> std::collections::BTreeMap<String, String> {
+        let mut values = std::collections::BTreeMap::new();
+        let loader = [
+            "/lib64/ld-linux-x86-64.so.2",
+            "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "/lib/ld-linux-aarch64.so.1",
+            "/lib/ld-musl-x86_64.so.1",
+        ]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file());
+        if let Some(loader) = loader {
+            values.insert("loader_path".into(), loader.into());
+            values.insert(
+                "libc".into(),
+                if loader.contains("musl") {
+                    "musl".into()
+                } else {
+                    "glibc".into()
+                },
+            );
+        }
+        values
     }
 }
 

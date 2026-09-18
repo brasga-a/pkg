@@ -109,10 +109,11 @@ Required evidence:
 - upgrade uses the same staged transaction model and survives forced interruption;
 - GC uses reachability/ownership evidence and never deletes uncertain or foreign content;
 - `pkg doctor` detects incomplete transactions and DB/store/profile divergence;
-- archive/parser/metadata fuzz targets run against a maintained hostile corpus;
+- archive/parser/metadata fuzz targets run against a maintained hostile corpus; the
+  reproducible smoke result is recorded in [docs/fuzzing-baseline-2026-09-17.md](../../docs/fuzzing-baseline-2026-09-17.md);
 - threat model/security review finds no unresolved blocker against current invariants;
 - native package databases remain untouched implicitly across install/update/upgrade/remove/GC flows;
-- DEC-021 and DEC-022 are either resolved by accepted ADRs where their behavior is included in v1, or explicitly excluded from the v1 support claim;
+- DEC-021 and DEC-022 are explicitly excluded from the v1 support claim by ADR-020;
 - exact supported package/host tuples are documented;
 - benchmark thresholds are recorded from reproducible CI hardware for repository parsing, solving, extraction, activation, and recovery.
 

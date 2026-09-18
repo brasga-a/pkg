@@ -8,7 +8,7 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, Cursor, Read};
+use std::io::{self, BufReader, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use xz2::read::XzDecoder;
 
@@ -16,7 +16,7 @@ use crate::domain::capability::{Capability, Dependency};
 use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstraint, VersionOp};
 use crate::domain::package::{
     Architecture, ArtifactDigest, LifecycleScript, NormalizedPackage, PackageEntry, PackageFormat,
-    PackageName, PackageVersion,
+    PackageName, PackageVersion, VersionedCapability,
 };
 use crate::error::{Error, Result};
 use crate::format::{ArtifactAdapter, ExtractionLimits, ExtractionReport};
@@ -26,6 +26,93 @@ use crate::format::{ArtifactAdapter, ExtractionLimits, ExtractionReport};
 pub struct AlpmAdapter;
 
 impl AlpmAdapter {
+    /// Creates payload directories without traversing a pre-existing symlink.
+    ///
+    /// A package archive may list entries in an arbitrary order.  Walking each
+    /// parent with `symlink_metadata` keeps a malicious entry from redirecting
+    /// a later file write outside the staging root.
+    fn create_payload_dirs(root: &Path, relative: &Path) -> Result<()> {
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(Error::SecurityViolation(format!(
+                        "Non-directory ALPM payload parent: {}",
+                        current.display()
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)?,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Verifies a materialized link and any link chain remain below `root`.
+    fn check_link_does_not_escape(root: &Path, relative: &Path, target: &Path) -> Result<()> {
+        let link_path = root.join(relative);
+        let parent = link_path.parent().unwrap_or(root);
+        let mut current = if parent.exists() {
+            fs::canonicalize(parent)?
+        } else {
+            root.to_path_buf()
+        };
+        if !current.starts_with(root) {
+            return Err(Error::SecurityViolation(format!(
+                "ALPM symlink parent escapes staging: {}",
+                relative.display()
+            )));
+        }
+
+        for component in target.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir => {
+                    return Err(Error::SecurityViolation(format!(
+                        "Absolute ALPM symlink target rejected: {} -> {}",
+                        relative.display(),
+                        target.display()
+                    )));
+                }
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if current == root || !current.starts_with(root) {
+                        return Err(Error::SecurityViolation(format!(
+                            "Escaping ALPM payload link: {}",
+                            relative.display()
+                        )));
+                    }
+                    current.pop();
+                }
+                Component::Normal(component) => {
+                    let next = current.join(component);
+                    if next.is_symlink() {
+                        if let Ok(canonical) = fs::canonicalize(&next) {
+                            if !canonical.starts_with(root) {
+                                return Err(Error::SecurityViolation(format!(
+                                    "Escaping ALPM payload link: {}",
+                                    relative.display()
+                                )));
+                            }
+                            current = canonical;
+                            continue;
+                        }
+                    }
+                    current = next;
+                }
+            }
+        }
+
+        if !current.starts_with(root) {
+            return Err(Error::SecurityViolation(format!(
+                "Escaping ALPM payload link: {}",
+                relative.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Creates a new ALPM format adapter.
     #[must_use]
     pub fn new() -> Self {
@@ -208,6 +295,12 @@ impl ArtifactAdapter for AlpmAdapter {
 
             let is_dir = entry.header().entry_type().is_dir();
             let is_symlink = entry.header().entry_type().is_symlink();
+            if !is_dir && !is_symlink && !entry.header().entry_type().is_file() {
+                return Err(Error::MalformedArchive(format!(
+                    "Unsupported ALPM payload entry type: {}",
+                    relative_path.display()
+                )));
+            }
             let symlink_target = if is_symlink {
                 entry.link_name()?.map(|p| p.to_path_buf())
             } else {
@@ -224,6 +317,11 @@ impl ArtifactAdapter for AlpmAdapter {
                             entry_provides.push(Capability::Executable(cmd.to_string()));
                         }
                     }
+                }
+                if let Some(filename) = relative_path.file_name().and_then(|n| n.to_str())
+                    && filename.contains(".so")
+                {
+                    entry_provides.push(Capability::SharedLibrary(filename.to_string()));
                 }
             }
 
@@ -255,6 +353,7 @@ impl ArtifactAdapter for AlpmAdapter {
             .get("pkgver")
             .ok_or_else(|| Error::MalformedArchive("Missing 'pkgver' in .PKGINFO".into()))?;
         let version = PackageVersion::new(pkgver);
+        version.validate()?;
 
         let arch_str = fields.get("arch").map(|s| s.as_str()).unwrap_or("x86_64");
         let architecture = Architecture::parse(arch_str);
@@ -275,12 +374,30 @@ impl ArtifactAdapter for AlpmAdapter {
 
         // Collect capabilities
         let mut provides = entry_provides;
+        let mut versioned_provides = Vec::new();
         for p in raw_provides {
-            if p.ends_with(".so") || p.contains(".so.") {
-                provides.push(Capability::SharedLibrary(p));
+            let (name, version) = p
+                .split_once('=')
+                .map(|(name, version)| (name.trim(), Some(version.trim())))
+                .unwrap_or((p.as_str(), None));
+            let capability = if name.ends_with(".so") || name.contains(".so.") {
+                Capability::SharedLibrary(name.to_string())
             } else if !p.starts_with('/') {
-                provides.push(Capability::Feature(p));
+                Capability::Feature(name.to_string())
+            } else {
+                continue;
+            };
+            if let Some(version) = version {
+                let version = PackageVersion::new(version);
+                if version.validate().is_ok() {
+                    versioned_provides.push(VersionedCapability {
+                        capability,
+                        version,
+                    });
+                    continue;
+                }
             }
+            provides.push(capability);
         }
 
         // Collect dependencies and normalized constraints
@@ -357,8 +474,10 @@ impl ArtifactAdapter for AlpmAdapter {
         }
 
         for c in raw_conflicts {
+            let (target, version) = parse_alpm_name_version(&c);
             constraints.push(Constraint::Conflict {
-                target: c.clone(),
+                target: target.to_string(),
+                version,
                 original_expression: c,
             });
         }
@@ -374,6 +493,7 @@ impl ArtifactAdapter for AlpmAdapter {
             dependencies,
             constraints,
             provides,
+            versioned_provides,
             scripts,
             entries,
             installed_size,
@@ -394,6 +514,9 @@ impl ArtifactAdapter for AlpmAdapter {
         let mut entries_count = 0usize;
         let mut symlinks_count = 0usize;
         let mut seen_paths = HashSet::new();
+        let mut pending_links = Vec::new();
+
+        fs::create_dir_all(destination)?;
 
         for entry_res in archive.entries()? {
             let mut entry = entry_res.map_err(|e| {
@@ -434,7 +557,9 @@ impl ArtifactAdapter for AlpmAdapter {
                 )));
             }
 
-            total_bytes += size;
+            total_bytes = total_bytes.checked_add(size).ok_or_else(|| {
+                Error::LimitsExceeded("ALPM total extracted bytes overflowed u64".into())
+            })?;
             if total_bytes > limits.max_total_bytes {
                 return Err(Error::LimitsExceeded(format!(
                     "Total extracted bytes exceeded limit of {}",
@@ -442,11 +567,10 @@ impl ArtifactAdapter for AlpmAdapter {
                 )));
             }
 
-            let target_path = destination.join(&relative_path);
             let entry_type = entry.header().entry_type();
 
             if entry_type.is_dir() {
-                fs::create_dir_all(&target_path)?;
+                Self::create_payload_dirs(destination, &relative_path)?;
             } else if entry_type.is_symlink() {
                 let link_target = entry.link_name()?.ok_or_else(|| {
                     Error::MalformedArchive(format!(
@@ -455,28 +579,51 @@ impl ArtifactAdapter for AlpmAdapter {
                     ))
                 })?;
 
-                if link_target.is_absolute() || link_target.to_string_lossy().contains("..") {
-                    return Err(Error::SecurityViolation(format!(
-                        "Unsafe symlink in ALPM: {} -> {}",
-                        relative_path.display(),
-                        link_target.display()
-                    )));
-                }
-
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&link_target, &target_path)?;
+                let sanitized_target =
+                    super::sanitize_symlink_target(&relative_path, &link_target, destination)?;
+                // Defer materialization until regular files are written.  This
+                // prevents archive order from redirecting a write through a
+                // previously-created symlink.
+                pending_links.push((relative_path.clone(), sanitized_target));
                 symlinks_count += 1;
             } else if entry_type.is_file() {
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent)?;
+                if let Some(parent) = relative_path.parent() {
+                    Self::create_payload_dirs(destination, parent)?;
                 }
-                entry.unpack(&target_path)?;
+
+                let target_path = destination.join(&relative_path);
+                let mut output = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target_path)?;
+                io::copy(&mut entry, &mut output)?;
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = entry.header().mode().unwrap_or(0o644);
+                    fs::set_permissions(&target_path, fs::Permissions::from_mode(mode))?;
+                }
+            } else {
+                return Err(Error::MalformedArchive(format!(
+                    "Unsupported ALPM payload entry type: {}",
+                    relative_path.display()
+                )));
             }
 
             extracted_files.push(relative_path);
+        }
+
+        for (relative, target) in &pending_links {
+            if let Some(parent) = relative.parent() {
+                Self::create_payload_dirs(destination, parent)?;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, destination.join(relative))?;
+        }
+        let root = fs::canonicalize(destination)?;
+        for (relative, target) in &pending_links {
+            Self::check_link_does_not_escape(&root, relative, target)?;
         }
 
         Ok(ExtractionReport {
@@ -486,4 +633,26 @@ impl ArtifactAdapter for AlpmAdapter {
             symlinks_count,
         })
     }
+}
+
+fn parse_alpm_name_version(raw: &str) -> (&str, VersionConstraint) {
+    let raw = raw.trim();
+    let (name, op, version) = [
+        (">=", VersionOp::GreaterEqual),
+        ("<=", VersionOp::LessEqual),
+        ("=", VersionOp::Exact),
+        (">", VersionOp::Greater),
+        ("<", VersionOp::Less),
+    ]
+    .into_iter()
+    .find_map(|(token, op)| {
+        raw.split_once(token)
+            .map(|(name, version)| (name.trim(), Some(op), version.trim()))
+    })
+    .unwrap_or((raw, None, ""));
+    let constraint = op
+        .zip((!version.is_empty()).then(|| PackageVersion::new(version)))
+        .map(|(op, version)| VersionConstraint::Relational(op, version))
+        .unwrap_or(VersionConstraint::Any);
+    (name, constraint)
 }

@@ -287,6 +287,9 @@ async fn test_target_resolution_and_disambiguation() {
         digest: "a".repeat(64),
         size_bytes: 400000,
         url: "http://example.com/curl.rpm".to_string(),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
 
     let arch_pkg = pkg_core::domain::package::RemotePackage {
@@ -298,6 +301,9 @@ async fn test_target_resolution_and_disambiguation() {
         digest: "b".repeat(64),
         size_bytes: 350000,
         url: "http://example.com/curl.pkg.tar.zst".to_string(),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
 
     let deb_pkg = pkg_core::domain::package::RemotePackage {
@@ -309,6 +315,9 @@ async fn test_target_resolution_and_disambiguation() {
         digest: "c".repeat(64),
         size_bytes: 250000,
         url: "http://example.com/curl.deb".to_string(),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
 
     engine
@@ -503,6 +512,9 @@ async fn test_remote_download_and_install_rpm_and_alpm() {
         digest: rpm_digest.hex().to_string(),
         size_bytes: rpm_bytes.len() as u64,
         url: format!("{}/hello-tool.rpm", server.url),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
 
     let cached_rpm = engine
@@ -525,6 +537,9 @@ async fn test_remote_download_and_install_rpm_and_alpm() {
         digest: alpm_digest.hex().to_string(),
         size_bytes: alpm_bytes.len() as u64,
         url: format!("{}/alpm-tool.pkg.tar.zst", server.url),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
 
     let cached_alpm = engine

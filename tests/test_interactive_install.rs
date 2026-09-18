@@ -34,6 +34,9 @@ fn test_cli_interactive_candidate_listing() {
         digest: "a".repeat(64),
         size_bytes: 1000,
         url: "http://example.com/test-editor.deb".to_string(),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
     let rpm_pkg = RemotePackage {
         repository_id: "fedora-41".to_string(),
@@ -44,6 +47,9 @@ fn test_cli_interactive_candidate_listing() {
         digest: "b".repeat(64),
         size_bytes: 1000,
         url: "http://example.com/test-editor.rpm".to_string(),
+        constraints: Vec::new(),
+        provides: Vec::new(),
+        versioned_provides: Vec::new(),
     };
 
     engine

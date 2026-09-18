@@ -2,4 +2,6 @@
 
 pub mod db;
 
-pub use db::{NewStoreObject, StateDatabase, TransactionRecord};
+pub use db::{
+    IntegrationRecord, NewStoreObject, StateDatabase, StoreObjectRecord, TransactionRecord,
+};

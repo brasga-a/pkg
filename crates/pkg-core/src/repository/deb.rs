@@ -1,9 +1,11 @@
 use crate::domain::package::RemotePackage;
 use crate::error::{Error, Result};
+use crate::format::deb::DebAdapter;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use pgp::{cleartext::CleartextSignedMessage, composed::SignedPublicKey};
 use reqwest::Client;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -342,6 +344,17 @@ fn verify_inrelease_signature(signed_text: &str, key_path: &Path) -> Result<Stri
     Ok(msg.signed_text())
 }
 
+/// Parses a Debian `Packages` index into normalized remote package records.
+///
+/// This public adapter is also used by the reproducible benchmark harness so
+/// repository parsing can be measured without network access or signature
+/// acquisition.
+pub fn parse_packages_index(text: &str, base_url: &str, dist: &str) -> Vec<RemotePackage> {
+    let mut packages = Vec::new();
+    parse_packages_file(text, base_url, dist, &mut packages);
+    packages
+}
+
 fn parse_packages_file(text: &str, base_url: &str, _dist: &str, packages: &mut Vec<RemotePackage>) {
     let mut name = String::new();
     let mut version = String::new();
@@ -349,10 +362,19 @@ fn parse_packages_file(text: &str, base_url: &str, _dist: &str, packages: &mut V
     let mut filename = String::new();
     let mut sha256 = String::new();
     let mut size: u64 = 0;
+    let mut depends = String::new();
+    let mut conflicts = String::new();
+    let mut provides = String::new();
 
     for line in text.lines() {
         if line.is_empty() {
             if !name.is_empty() && !filename.is_empty() {
+                let metadata = HashMap::from([
+                    ("Depends".to_string(), depends.clone()),
+                    ("Conflicts".to_string(), conflicts.clone()),
+                    ("Provides".to_string(), provides.clone()),
+                ]);
+                let (provides, versioned_provides) = DebAdapter::parse_provides(&metadata);
                 packages.push(RemotePackage {
                     repository_id: format!("{}-{}", base_url, name), // just a mock ID base
                     name: name.clone(),
@@ -362,6 +384,9 @@ fn parse_packages_file(text: &str, base_url: &str, _dist: &str, packages: &mut V
                     digest: sha256.clone(),
                     size_bytes: size,
                     url: format!("{}/{}", base_url, filename),
+                    constraints: DebAdapter::parse_constraints(&metadata),
+                    provides,
+                    versioned_provides,
                 });
             }
             name.clear();
@@ -370,6 +395,9 @@ fn parse_packages_file(text: &str, base_url: &str, _dist: &str, packages: &mut V
             filename.clear();
             sha256.clear();
             size = 0;
+            depends.clear();
+            conflicts.clear();
+            provides.clear();
             continue;
         }
 
@@ -390,11 +418,37 @@ fn parse_packages_file(text: &str, base_url: &str, _dist: &str, packages: &mut V
             sha256 = stripped.to_string();
         } else if let Some(stripped) = line.strip_prefix("Size: ") {
             size = stripped.parse().unwrap_or(0);
+        } else if let Some(stripped) = line.strip_prefix("Depends: ") {
+            depends = stripped.to_string();
+        } else if let Some(stripped) = line.strip_prefix("Pre-Depends: ") {
+            if depends.is_empty() {
+                depends = stripped.to_string();
+            } else {
+                depends.push_str(", ");
+                depends.push_str(stripped);
+            }
+        } else if let Some(stripped) = line.strip_prefix("Conflicts: ") {
+            conflicts = stripped.to_string();
+        } else if let Some(stripped) = line.strip_prefix("Breaks: ") {
+            if conflicts.is_empty() {
+                conflicts = stripped.to_string();
+            } else {
+                conflicts.push_str(", ");
+                conflicts.push_str(stripped);
+            }
+        } else if let Some(stripped) = line.strip_prefix("Provides: ") {
+            provides = stripped.to_string();
         }
     }
 
     // Flush last package if file didn't end with an empty line
     if !name.is_empty() && !filename.is_empty() {
+        let metadata = HashMap::from([
+            ("Depends".to_string(), depends.clone()),
+            ("Conflicts".to_string(), conflicts.clone()),
+            ("Provides".to_string(), provides.clone()),
+        ]);
+        let (provides, versioned_provides) = DebAdapter::parse_provides(&metadata);
         packages.push(RemotePackage {
             repository_id: format!("{}-{}", base_url, name),
             name: name.clone(),
@@ -404,6 +458,9 @@ fn parse_packages_file(text: &str, base_url: &str, _dist: &str, packages: &mut V
             digest: sha256.clone(),
             size_bytes: size,
             url: format!("{}/{}", base_url, filename),
+            constraints: DebAdapter::parse_constraints(&metadata),
+            provides,
+            versioned_provides,
         });
     }
 }
@@ -494,5 +551,21 @@ SHA256: 01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
         assert_eq!(packages[1].name, "wget");
         assert_eq!(packages[1].version, "1.21.3-1+b2");
         assert_eq!(packages[1].size_bytes, 991284);
+    }
+
+    #[test]
+    fn packages_file_preserves_versioned_provides() {
+        let sample = "Package: provider\nVersion: 1\nArchitecture: amd64\nProvides: virtual-api (= 2.4), unversioned-api\nFilename: pool/provider.deb\nSize: 1\nSHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+        let mut packages = Vec::new();
+        parse_packages_file(
+            sample,
+            "https://example.invalid/repo",
+            "stable",
+            &mut packages,
+        );
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].provides.len(), 1);
+        assert_eq!(packages[0].versioned_provides.len(), 1);
+        assert_eq!(packages[0].versioned_provides[0].version.as_str(), "2.4");
     }
 }

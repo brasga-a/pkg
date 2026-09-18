@@ -59,6 +59,9 @@ async fn test_contextual_dependency_resolution_priorities() {
             digest: "a".repeat(64),
             size_bytes: 1000,
             url: "https://example.com/arch/libxml2".into(),
+            constraints: Vec::new(),
+            provides: Vec::new(),
+            versioned_provides: Vec::new(),
         },
         RemotePackage {
             repository_id: "ubuntu-noble".into(),
@@ -69,6 +72,9 @@ async fn test_contextual_dependency_resolution_priorities() {
             digest: "b".repeat(64),
             size_bytes: 1000,
             url: "http://example.com/ubuntu/libxml2".into(),
+            constraints: Vec::new(),
+            provides: Vec::new(),
+            versioned_provides: Vec::new(),
         },
         RemotePackage {
             repository_id: "debian-bookworm".into(),
@@ -79,6 +85,9 @@ async fn test_contextual_dependency_resolution_priorities() {
             digest: "c".repeat(64),
             size_bytes: 1000,
             url: "http://example.com/debian/libxml2".into(),
+            constraints: Vec::new(),
+            provides: Vec::new(),
+            versioned_provides: Vec::new(),
         },
         RemotePackage {
             repository_id: "ubuntu-noble".into(),
@@ -89,6 +98,9 @@ async fn test_contextual_dependency_resolution_priorities() {
             digest: "d".repeat(64),
             size_bytes: 2000,
             url: "http://example.com/ubuntu/libvirt0".into(),
+            constraints: Vec::new(),
+            provides: Vec::new(),
+            versioned_provides: Vec::new(),
         },
         RemotePackage {
             repository_id: "debian-bookworm".into(),
@@ -99,6 +111,9 @@ async fn test_contextual_dependency_resolution_priorities() {
             digest: "e".repeat(64),
             size_bytes: 2000,
             url: "http://example.com/debian/libvirt0".into(),
+            constraints: Vec::new(),
+            provides: Vec::new(),
+            versioned_provides: Vec::new(),
         },
         RemotePackage {
             repository_id: "arch-core".into(),
@@ -109,6 +124,9 @@ async fn test_contextual_dependency_resolution_priorities() {
             digest: "f".repeat(64),
             size_bytes: 500,
             url: "https://example.com/arch/arch-only-dep".into(),
+            constraints: Vec::new(),
+            provides: Vec::new(),
+            versioned_provides: Vec::new(),
         },
     ];
 

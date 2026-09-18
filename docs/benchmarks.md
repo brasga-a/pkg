@@ -1,12 +1,17 @@
 # Benchmarks e Performance
 
-Um dos objetivos centrais do `pkg` é fornecer tempos de instalação e gerenciamento ordens de grandeza mais rápidos que gerenciadores tradicionais de distribuições Linux (`apt`, `dnf`), mantendo total previsibilidade e isolamento.
+Os benchmarks medem o custo do caminho rootless do `pkg` mantendo previsibilidade
+e isolamento. Eles não constituem uma promessa de desempenho entre hosts ou
+contra gerenciadores nativos.
 
 ---
 
 ## ⚡ Por que o `pkg` é tão rápido?
 
-Em testes empíricos com pacotes reais (como o cliente Discord para Linux), a instalação via `pkg` ocorre de forma **quase instantânea (< 100ms)**, enquanto ferramentas como o `apt` levam comumente entre 2 e 5 segundos para a mesma operação.
+O baseline versionado usa a fixture local `hello-world`; os números atuais e o
+ambiente estão em [benchmark-baseline-2026-09-17.md](benchmark-baseline-2026-09-17.md).
+Comparações com `apt`, `dnf` ou `pacman` exigem a mesma fixture, host e política
+de cache e ainda não fazem parte do gate publicado.
 
 ### Comparativo Arquitetural: `pkg` vs. Gerenciadores Nativos
 
@@ -52,6 +57,18 @@ O script automaticamente:
 ---
 
 ## 📊 Medições e Compartilhamento
+
+The release gate categories have a dedicated reproducible driver:
+
+```bash
+./benchmarks/run-gates.sh --runs 10 --warmup 2
+```
+
+It records repository parsing, dependency solving, payload extraction,
+activation/publication and transaction recovery in
+`benchmarks/results/gates/`. Each category uses a fresh process; mutating
+categories use fresh temporary roots. The checked-in baseline documents the
+host, toolchain and exact fixture used for the measured values.
 
 Para gerar gráficos visuais formatados em PNG após a execução dos testes:
 

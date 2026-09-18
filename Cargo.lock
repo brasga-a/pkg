@@ -2264,6 +2264,7 @@ dependencies = [
  "reqwest",
  "rpm",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tar",

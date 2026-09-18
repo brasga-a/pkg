@@ -55,7 +55,7 @@ Este documento resume a evolução do desenvolvimento do `pkg`, consolidando o q
   - Armazenamento em `cache/artifacts/sha256/<hash>`.
   - Validação cruzada de SHA-256 pós-download contra a assinatura do repositório.
 - [x] **Novos Comandos CLI:**
-  - `pkg update`: Atualização de repositórios e compilação de snapshots.
+  - `pkg repo sync` (aliases `pkg sync` / `pkg repo update`): Sincronização de repositórios remotos e compilação de snapshots.
   - `pkg search <termo>`: Busca instantânea no catálogo local.
   - `pkg repo list` e `pkg repo add`: Gerenciamento declarativo via CLI.
   - `pkg install <nome>`: Resolução automática de pacotes remotos, download para o cache e instalação na store.
