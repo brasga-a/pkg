@@ -131,13 +131,13 @@ async function handleLatestVersion(repo) {
     });
 
     if (!res.ok) {
-      return new Response("v0.1.0-beta.2\n", {
+      return new Response("v0.1.0-beta.3\n", {
         headers: { "Content-Type": "text/plain; charset=utf-8" }
       });
     }
 
     const data = await res.json();
-    const tag = data.tag_name || "v0.1.0-beta.2";
+    const tag = data.tag_name || "v0.1.0-beta.3";
     return new Response(`${tag}\n`, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
@@ -146,7 +146,7 @@ async function handleLatestVersion(repo) {
       }
     });
   } catch (_e) {
-    return new Response("v0.1.0-beta.2\n", {
+    return new Response("v0.1.0-beta.3\n", {
       headers: { "Content-Type": "text/plain; charset=utf-8" }
     });
   }
@@ -314,7 +314,7 @@ function handleLandingPage(repo) {
   <div class="container">
     <div class="badge">
       <span class="badge-dot"></span>
-      v0.1.0-beta.2 • Rootless & Universal
+      v0.1.0-beta.3 • Rootless & Universal
     </div>
     
     <div>
