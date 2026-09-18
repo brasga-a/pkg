@@ -269,20 +269,20 @@ Extend the local kernel into a remote package workflow: synchronize Debian repos
 
 ### Small tasks
 
-- [ ] Add repository configuration loading and stable repository IDs.
-- [ ] Implement bounded HTTP downloads with Tokio/reqwest.
-- [ ] Separate metadata cache, artifact cache, and temporary downloads.
-- [ ] Implement the first Debian repository metadata adapter.
-- [ ] Verify repository metadata using Debian-compatible trust evidence.
-- [ ] Normalize repository packages into immutable local snapshots.
-- [ ] Atomically switch the active snapshot only after successful parse/verification.
-- [ ] Keep the previous valid snapshot active when refresh fails.
-- [ ] Implement digest-addressed artifact caching and mismatch rejection.
-- [ ] Add `pkg repo list`, `pkg repo add`, and `pkg update` behavior.
-- [ ] Implement repository-backed `pkg search` and `pkg info`.
-- [ ] Implement remote `pkg install <name>` using the M1 transaction executor.
-- [ ] Add explicit offline/stale-metadata behavior.
-- [ ] Add tests for bad signatures, bad digests, interrupted downloads, stale snapshots, and failed refresh rollback.
+- [x] Add repository configuration loading and stable repository IDs.
+- [x] Implement bounded HTTP downloads with Tokio/reqwest.
+- [x] Separate metadata cache, artifact cache, and temporary downloads.
+- [x] Implement the first Debian repository metadata adapter.
+- [x] Verify repository metadata using Debian-compatible trust evidence.
+- [x] Normalize repository packages into immutable local snapshots.
+- [x] Atomically switch the active snapshot only after successful parse/verification.
+- [x] Keep the previous valid snapshot active when refresh fails.
+- [x] Implement digest-addressed artifact caching and mismatch rejection.
+- [x] Add `pkg repo list`, `pkg repo add`, and repository synchronization via `pkg repo sync` (with `pkg sync` / `pkg repo update` aliases).
+- [x] Implement repository-backed `pkg search` and `pkg info`.
+- [x] Implement remote `pkg install <name>` using the M1 transaction executor.
+- [x] Add explicit offline/stale-metadata behavior.
+- [x] Add tests for bad signatures, bad digests, interrupted downloads, stale snapshots, and failed refresh rollback.
 
 ### Release gate
 
@@ -306,7 +306,7 @@ Generalize the artifact/repository boundary to RPM and ALPM, introduce a normali
 - **DEC-016** — compatibility is capability/evidence based.
 - **DEC-017** — support order is `.deb` → RPM → ALPM.
 - **DEC-020** — native host dependency provider remains deferred; do not make it an implicit requirement.
-- **DEC-021** — pkg-native repository signing is still open and is not required for RPM/ALPM interoperability.
+- **DEC-021** — pkg-native repository signing is deferred outside v1 by ADR-020 and is not required for RPM/ALPM interoperability.
 
 ### Required invariants
 
@@ -327,27 +327,28 @@ Generalize the artifact/repository boundary to RPM and ALPM, introduce a normali
 
 ### Small tasks
 
-- [ ] Define the normalized constraint IR for all-of, any-of, capability, version, architecture, and conflicts.
-- [ ] Preserve original Debian/RPM/ALPM expressions alongside normalized constraints for diagnostics.
-- [ ] Implement RPM artifact probing, metadata normalization, payload extraction, and scriptlet inventory.
-- [ ] Implement the first RPM repository metadata adapter.
-- [ ] Implement ALPM `.pkg.tar.zst` parsing and `.PKGINFO` normalization.
-- [ ] Implement the first ALPM repository database adapter.
-- [ ] Normalize package `Provides`, executable capabilities, and relevant ELF/SONAME capabilities.
-- [ ] Build provider-selection logic over package closure plus observed host capabilities.
-- [ ] Evaluate a PubGrub-class solver behind the IR instead of coupling source adapters to solver types.
-- [ ] Preserve ecosystem-specific version ordering rather than coercing versions to SemVer.
-- [ ] Produce human-readable unsatisfied/conflict explanation chains.
-- [ ] Build a compatibility corpus spanning representative Debian, RPM, and Arch packages.
-- [ ] Add regression tests for false package-name equivalence and ABI mismatch.
+- [x] Define the normalized constraint IR for all-of, any-of, capability, version, architecture, and conflicts.
+- [x] Preserve original Debian/RPM/ALPM expressions alongside normalized constraints for diagnostics.
+- [x] Implement RPM artifact probing, metadata normalization, payload extraction, and scriptlet inventory.
+- [x] Implement ALPM `.pkg.tar.zst` parsing and `.PKGINFO` normalization.
+- [x] Normalize package `Provides`, executable capabilities, and relevant ELF/SONAME capabilities.
+- [x] Build provider-selection logic over package closure plus observed host capabilities.
+- [x] Evaluate a PubGrub-class solver behind the IR instead of coupling source adapters to solver types.
+- [x] Preserve ecosystem-specific version ordering rather than coercing versions to SemVer.
+- [x] Produce human-readable unsatisfied/conflict explanation chains.
+- [x] Build a compatibility corpus spanning representative Debian, RPM, and Arch packages.
+- [x] Add regression tests for false package-name equivalence and ABI mismatch.
+- [x] Pass all Gate M3 release gate criteria (`tests/gate_m3_resolver.rs`).
+- [x] Implement online RPM-MD repository metadata adapter (`repomd.xml` / `primary.xml`). (Scoped for Remote Multi-Ecosystem Catalogs)
+- [x] Implement online ALPM repository database adapter (`core.db` / `extra.db` sync DBs). AUR remains outside the binary-repository contract. (Scoped for Remote Multi-Ecosystem Catalogs)
 
 ### Release gate
 
-- [Gate M3 — Resolver](release-gates.md#gate-m3--resolver)
+- [Gate M3 — Resolver](release-gates.md#gate-m3--resolver) (PASSED)
 
 ### Exit criteria
 
-M3 is complete when supported package classes from Debian, RPM, and ALPM can enter the same normalized planning model, resolver failures are explainable, source version semantics remain intact, and the compatibility corpus demonstrates that pkg does not claim support from name matching alone.
+M3 is complete when supported package classes from Debian, RPM, and ALPM can enter the same normalized planning model, resolver failures are explainable, source version semantics remain intact, and the compatibility corpus demonstrates that pkg does not claim support from name matching alone. (MET)
 
 ---
 
@@ -384,17 +385,17 @@ Add a narrow, reversible user-space host-integration layer for desktop applicati
 
 ### Small tasks
 
-- [ ] Define typed integration actions for user desktop entries, icons, and safe MIME registration.
-- [ ] Persist ownership/evidence for every host-visible integration action.
-- [ ] Implement desktop-entry validation and deterministic rewriting where required by store relocation.
-- [ ] Implement user icon activation without system-wide writes.
-- [ ] Implement safe MIME integration only for the accepted user-space subset.
-- [ ] Extend transaction planning so integrations appear before mutation and participate in recovery.
-- [ ] Reverse integrations during uninstall using ownership records rather than path heuristics.
-- [ ] Expand relocation inspection for desktop application paths and data directories.
-- [ ] Add fixtures for missing/invalid desktop files, conflicting desktop IDs, icons, and MIME declarations.
-- [ ] Add a representative GUI application compatibility corpus.
-- [ ] Verify that no system service, system user/group, package DB, or system-critical path is mutated.
+- [x] Define typed integration actions for user desktop entries, icons, and safe MIME registration.
+- [x] Persist ownership/evidence for every host-visible integration action.
+- [x] Implement desktop-entry validation and deterministic rewriting where required by store relocation.
+- [x] Implement user icon activation without system-wide writes.
+- [x] Implement safe MIME integration only for the accepted user-space subset.
+- [x] Extend transaction planning so integrations appear before mutation and participate in recovery.
+- [x] Reverse integrations during uninstall using ownership records rather than path heuristics.
+- [x] Expand relocation inspection for desktop application paths and data directories.
+- [x] Add fixtures for missing/invalid desktop files, conflicting desktop IDs, icons, and MIME declarations.
+- [x] Add a representative GUI application compatibility corpus (`crates/pkg-core/fixtures/gui`).
+- [x] Verify that no system service, system user/group, package DB, or system-critical path is mutated.
 
 ### Release gate
 
@@ -423,11 +424,13 @@ Accepted foundations:
 - **DEC-012** — durable staged transactions.
 - **DEC-013** — digest-addressed artifact cache.
 - **DEC-015** — stable CLI contract, unstable internal API.
+- **DEC-023** — agent-first architecture and native MCP server.
 
-Open decisions that must be resolved before their dependent v1 work is considered final:
+The following decisions are explicitly excluded from the v1 support claim by
+[ADR-020](../adr/ADR-020-v1-scope-for-signing-and-store-identity.md):
 
-- **DEC-021** — pkg-native repository signing format.
-- **DEC-022** — content-addressed store vs artifact-derived store IDs.
+- **DEC-021** — pkg-native repository signing format (post-v1).
+- **DEC-022** — final content-addressed store identity semantics (post-v1).
 
 ### Required invariants
 
@@ -441,6 +444,8 @@ Open decisions that must be resolved before their dependent v1 work is considere
 - **INV-016** — freshness and authenticity remain distinct.
 - **INV-017** — cache remains identity/digest based.
 - **INV-020** — resolution failures stay explainable.
+- **INV-021** — non-interactive CLI and automated invocations never block on stdin without a TTY.
+- **INV-022** — structured output schemas (--json) and native MCP tools are public API contracts.
 
 ### Governing ADRs
 
@@ -451,27 +456,33 @@ Open decisions that must be resolved before their dependent v1 work is considere
 - [ADR-012 — durable staged transactions](../adr/ADR-012-durable-staged-transactions.md)
 - [ADR-013 — digest-addressed artifact cache](../adr/ADR-013-digest-addressed-artifact-cache.md)
 - [ADR-015 — CLI contract](../adr/ADR-015-cli-contract.md)
+- [ADR-019 — agent-first architecture and native MCP integration](../adr/ADR-019-agent-first-architecture-and-mcp-integration.md)
+- [ADR-020 — v1 scope for signing and store identity](../adr/ADR-020-v1-scope-for-signing-and-store-identity.md)
 
-New ADRs are required before closing any work that resolves **DEC-021** or **DEC-022**.
+Any post-v1 work that resolves **DEC-021** or **DEC-022** requires a new ADR
+covering migration and compatibility evidence.
 
 ### Small tasks
 
-- [ ] Model profile generations as immutable activation snapshots.
-- [ ] Implement atomic generation switching.
-- [ ] Implement `pkg upgrade --dry-run` and transactional upgrade execution.
-- [ ] Implement rollback to a retained valid generation.
-- [ ] Build reachability analysis for store objects, retained generations, pins, and incomplete transactions.
-- [ ] Implement `pkg gc --dry-run` before destructive GC.
-- [ ] Garbage-collect only provably unreachable pkg-owned content.
-- [ ] Implement `pkg doctor` checks for DB/store/profile/transaction consistency.
-- [ ] Add conservative repair paths for known pkg-owned inconsistent state.
-- [ ] Resolve DEC-021 with an ADR before declaring a pkg-native signing format stable.
-- [ ] Resolve DEC-022 with an ADR before declaring final store identity semantics stable.
-- [ ] Add archive/parser/metadata fuzz targets and a hostile corpus.
-- [ ] Run transaction fault injection across install, upgrade, activation, rollback, and GC.
-- [ ] Produce benchmark baselines for repository parsing, solving, extraction, activation, and recovery.
-- [ ] Document exact support tuples/package classes instead of broad “all Linux packages” claims.
-- [ ] Perform a security/threat-model review against current invariants and release gates.
+- [x] Model profile generations as immutable activation snapshots.
+- [x] Implement atomic generation switching.
+- [x] Implement `pkg update`/`pkg upgrade --dry-run` and transactional upgrade execution.
+- [x] Implement rollback to a retained valid generation.
+- [x] Build reachability analysis for store objects, retained generations, pins, and incomplete transactions.
+- [x] Implement `pkg gc --dry-run` before destructive GC.
+- [x] Garbage-collect only provably unreachable pkg-owned content.
+- [x] Implement `pkg doctor` checks for DB/store/profile/transaction consistency.
+- [x] Add conservative repair paths for known pkg-owned inconsistent state.
+- [x] Implement stable `--json` output contract across all CLI commands.
+- [x] Implement fail-safe non-interactive mode and semantic exit codes for autonomous agents.
+- [x] Implement ephemeral task profile management (`create`/`drop`) for agent workspace sandboxing.
+- [x] Implement native Model Context Protocol (MCP) server subcommand (`pkg mcp`).
+- [x] Exclude DEC-021 and DEC-022 from the v1 support claim through ADR-020.
+- [x] Add archive/parser/metadata fuzz targets and a hostile corpus.
+- [x] Add deterministic install, rollback and GC fault injection with recovery tests; upgrade uses the same staged install executor.
+- [x] Produce benchmark baselines for repository parsing, solving, extraction, activation, and recovery.
+- [x] Document exact support tuples/package classes instead of broad “all Linux packages” claims.
+- [x] Perform a bounded security/threat-model review against current invariants and release gates.
 
 ### Release gate
 

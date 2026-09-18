@@ -17,7 +17,7 @@ impl ProcessLock {
     /// Attempts to acquire an exclusive non-blocking advisory file lock.
     pub fn acquire(lock_path: &Path) -> Result<Self> {
         if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::store::layout::ensure_directory(parent)?;
         }
 
         let file = OpenOptions::new()
@@ -86,5 +86,19 @@ mod tests {
         // Now second attempt must succeed
         let lock3 = ProcessLock::acquire(&lock_path);
         assert!(lock3.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_rejects_symlinked_parent_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let managed = temp.path().join("managed");
+        std::os::unix::fs::symlink(&outside, &managed).unwrap();
+
+        let error = ProcessLock::acquire(&managed.join("pkg.lock")).unwrap_err();
+        assert!(matches!(error, Error::SecurityViolation(_)));
+        assert!(!outside.join("pkg.lock").exists());
     }
 }

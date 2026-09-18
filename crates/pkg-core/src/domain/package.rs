@@ -2,15 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::domain::capability::{Capability, Dependency};
+use crate::domain::constraint::Constraint;
 use crate::error::{Error, Result};
 
 /// A normalized package name.
 ///
-/// Debian and modern Linux package managers enforce lowercase alphanumeric names
-/// with hyphens, dots, and plus signs.
+/// Package names are kept with their source spelling because RPM names are
+/// case-sensitive and may contain uppercase letters and underscores.  The
+/// common portable alphabet is ASCII alphanumeric characters plus `-`, `.`,
+/// `_`, and `+`; the first character must be alphanumeric.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PackageName(String);
 
@@ -24,20 +27,18 @@ impl PackageName {
                 "Package name cannot be empty".into(),
             ));
         }
-        // Validate characters: must start with lowercase letter or digit
+        // Validate characters without applying a lossy case conversion. Debian
+        // and ALPM repositories normally use lowercase names, while RPM
+        // repositories legitimately contain names such as `0xFFFF` and
+        // `AMF-devel`.
         let first = trimmed.chars().next().unwrap();
-        if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        if !first.is_ascii_alphanumeric() {
             return Err(Error::MalformedArchive(format!(
-                "Invalid package name '{trimmed}': must start with lowercase letter or digit"
+                "Invalid package name '{trimmed}': must start with an ASCII letter or digit"
             )));
         }
         for ch in trimmed.chars() {
-            if !ch.is_ascii_lowercase()
-                && !ch.is_ascii_digit()
-                && ch != '-'
-                && ch != '.'
-                && ch != '+'
-            {
+            if !ch.is_ascii_alphanumeric() && !matches!(ch, '-' | '.' | '_' | '+') {
                 return Err(Error::MalformedArchive(format!(
                     "Invalid character '{ch}' in package name '{trimmed}'"
                 )));
@@ -64,6 +65,23 @@ impl fmt::Display for PackageName {
 pub struct PackageVersion(String);
 
 impl PackageVersion {
+    /// Rejects versions that cannot safely identify a Debian store object.
+    pub fn validate(&self) -> Result<()> {
+        if self.0.is_empty()
+            || self.0.len() > 128
+            || !self
+                .0
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".+~:_^-".contains(&b))
+        {
+            return Err(Error::MalformedArchive(format!(
+                "Invalid package version: {:?}",
+                self.0
+            )));
+        }
+        Ok(())
+    }
+
     /// Creates a package version string.
     pub fn new(version: impl Into<String>) -> Self {
         Self(version.into().trim().to_string())
@@ -100,7 +118,7 @@ impl Architecture {
     pub fn parse(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "amd64" | "x86_64" | "x86-64" => Self::X86_64,
-            "all" => Self::All,
+            "all" | "noarch" => Self::All,
             "any" => Self::Any,
             other => Self::Other(other.to_string()),
         }
@@ -112,7 +130,7 @@ impl Architecture {
         match (self, host) {
             (Self::All | Self::Any, _) => true,
             (Self::X86_64, Self::X86_64) => true,
-            (Self::Other(a), Self::Other(b)) => a == b,
+            (Self::Other(a), Self::Other(b)) => canonical_arch(a) == canonical_arch(b),
             _ => false,
         }
     }
@@ -126,6 +144,16 @@ impl Architecture {
             Self::Any => "any",
             Self::Other(s) => s.as_str(),
         }
+    }
+}
+
+fn canonical_arch(value: &str) -> &str {
+    match value {
+        "arm64" => "aarch64",
+        "armhf" | "armv7h" | "armv7" => "arm",
+        "i386" | "i486" | "i586" | "x86" => "i686",
+        "ppc64el" => "ppc64le",
+        other => other,
     }
 }
 
@@ -180,6 +208,22 @@ impl ArtifactDigest {
         Self::new("sha256", hex)
     }
 
+    /// Computes the SHA-256 digest of a file.
+    pub fn from_file(path: &Path) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok(Self::sha256(format!("{:x}", hasher.finalize())))
+    }
+
     /// Returns the digest hex string.
     #[must_use]
     pub fn hex(&self) -> &str {
@@ -209,6 +253,46 @@ pub struct LifecycleScript {
     pub name: String,
     /// Script body/content.
     pub content: String,
+}
+
+/// A verified, installed package present in the local store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPackage {
+    pub name: String,
+    pub version: String,
+    pub architecture: String,
+    pub format: String,
+    pub digest: String,
+    pub store_id: String,
+    pub store_path: PathBuf,
+    pub installed_at: String, // ISO8601 string
+    pub active: bool,
+    pub profile: String,
+    pub binaries: Vec<String>,
+}
+
+/// A package available in a remote repository snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePackage {
+    pub repository_id: String,
+    pub name: String,
+    pub version: String,
+    pub architecture: String,
+    pub format: String,
+    pub digest: String,
+    pub size_bytes: u64,
+    pub url: String,
+    /// Normalized dependency constraints from the repository snapshot.
+    #[serde(default)]
+    pub constraints: Vec<Constraint>,
+    /// Capabilities explicitly provided by repository metadata.
+    #[serde(default)]
+    pub provides: Vec<Capability>,
+    /// Capabilities with an explicit provider version from repository metadata.
+    /// Keeping this separate from the package version prevents an unversioned
+    /// virtual provide from accidentally satisfying a relational requirement.
+    #[serde(default)]
+    pub versioned_provides: Vec<VersionedCapability>,
 }
 
 /// Metadata describing a single file entry in the package payload.
@@ -247,12 +331,48 @@ pub struct NormalizedPackage {
     pub description: Option<String>,
     /// Declared dependencies.
     pub dependencies: Vec<Dependency>,
+    /// Normalized constraint requirements (ADR-009).
+    #[serde(default)]
+    pub constraints: Vec<crate::domain::constraint::Constraint>,
     /// Provided capabilities (e.g. binaries).
     pub provides: Vec<Capability>,
+    /// Capabilities whose source metadata carries an explicit provider
+    /// version (for example Debian/RPM versioned `Provides`).  The legacy
+    /// `provides` list remains the unversioned form for compatibility.
+    #[serde(default)]
+    pub versioned_provides: Vec<VersionedCapability>,
     /// Inventoried maintainer scripts (not executed).
     pub scripts: Vec<LifecycleScript>,
     /// Package file entries.
     pub entries: Vec<PackageEntry>,
     /// Installed uncompressed size estimate in bytes.
     pub installed_size: Option<u64>,
+}
+
+/// A capability with an explicit native package version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionedCapability {
+    pub capability: Capability,
+    pub version: PackageVersion,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_architecture_noarch_matches_x86_64_host() {
+        let package = Architecture::parse("noarch");
+        assert_eq!(package, Architecture::All);
+        let host = Architecture::X86_64;
+        assert!(package.matches_host(&host));
+
+        assert!(Architecture::parse("all").matches_host(&host));
+        assert!(Architecture::parse("any").matches_host(&host));
+        assert!(Architecture::parse("x86_64").matches_host(&host));
+        assert!(Architecture::parse("amd64").matches_host(&host));
+        assert!(!Architecture::parse("aarch64").matches_host(&host));
+        assert!(Architecture::parse("arm64").matches_host(&Architecture::parse("aarch64")));
+        assert!(Architecture::parse("i386").matches_host(&Architecture::parse("i686")));
+    }
 }

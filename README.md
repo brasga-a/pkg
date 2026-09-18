@@ -1,8 +1,8 @@
 # pkg
 
-A universal, cross-distribution package manager for Linux, built in Rust.
+A universal, cross-distribution, rootless package manager for Linux — built for Humans and AI Agents.
 
-> **Status:** architecture proposal / pre-implementation.
+> **Status:** beta / under active development.
 
 `pkg` aims to provide one predictable installation interface across Linux distributions **without pretending Debian, Fedora and Arch are the same system**.
 
@@ -13,6 +13,20 @@ The core model treats `.deb`, RPM, `.pkg.tar.zst` and future package formats as 
 Linux software distribution is fragmented across package formats, repository models, dependency vocabularies and distro policies. A vendor may ship only a `.deb`, only an RPM, an Arch package, or a tarball.
 
 The project goal is to normalize **delivery and package management UX**, while preserving the technical boundaries that actually matter: ABI compatibility, lifecycle behavior, repository trust, file ownership and host integration.
+
+## Quick Install
+
+Install the latest release of `pkg` rootless into user-space:
+
+```bash
+curl -fsSL https://pkg.atlantic.sh/install | sh
+```
+
+Custom options:
+
+```bash
+curl -fsSL https://pkg.atlantic.sh/install | bash -s -- --dir ~/.local/bin --version 0.1.0-beta.1
+```
 
 ```bash
 pkg search ripgrep
@@ -52,9 +66,20 @@ The architecture is built around a few hard boundaries:
 - planning is side-effect free;
 - install/update/remove operations are transaction-oriented and recoverable;
 - user-space/rootless installation is the default;
+- dual interface contract: human-friendly terminal UX alongside machine-first `--json` and native Model Context Protocol (MCP) server for AI agents;
 - host-visible integration must be explicit, typed and reversible.
 
 See [`context/README.md`](context/README.md) for the full engineering context and source-of-truth hierarchy.
+
+## Built for Humans and AI Agents
+
+`pkg` is designed from the foundation for both human software engineers and autonomous AI agents (such as Google Antigravity, Claude Code, Cursor, Devin, and OpenHands):
+
+- **Zero Root Privilege**: Runs 100% rootless in user-space. Agents cannot break system libraries, corrupt PAM/init configs, or brick the host operating system.
+- **Fail-Safe Non-Interactive Execution**: Never hangs indefinitely waiting for input on `stdin` when running in headless/agent environments.
+- **Machine-First Structured Contracts**: Full `--json` support across commands with stable schemas, exact binary path reporting, and clear exit codes.
+- **Native Model Context Protocol (MCP)**: Directly integrates with agent tools via `pkg mcp` over standard I/O (see [`context/design/agent-first-architecture.md`](context/design/agent-first-architecture.md)).
+- **Ephemeral Task Profiles**: Allows agents to spin up disposable workspaces (`pkg profile create <task>`) and drop them cleanly without leaving residual clutter on the user's system.
 
 ## Planned MVP
 
@@ -97,15 +122,24 @@ The planned command surface currently includes:
 ```text
 pkg install
 pkg remove
+pkg integrate <package>
+pkg deintegrate <package>
 pkg list
 pkg info
 pkg search
+pkg repo sync
 pkg update
 pkg upgrade
 pkg repo list
 pkg repo add
+pkg repo update # alias of pkg repo sync
 pkg doctor
 pkg gc
+pkg profile create <task>
+pkg profile list
+pkg profile drop <task>
+pkg query-command <command>
+pkg mcp
 ```
 
 Detailed behavior for each command lives in [`context/commands/`](context/commands/README.md).

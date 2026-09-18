@@ -22,8 +22,9 @@
 | DEC-018 | Accepted | Host integration must be explicit/reversible | ADR-018 | M4 |
 | DEC-019 | Deferred | Container fallback for non-relocatable packages | — | Post-v1 |
 | DEC-020 | Deferred | Native host dependency provider | — | M3+ |
-| DEC-021 | Open | Pkg-native repository signing format | — | M5 |
-| DEC-022 | Open | Content-addressed store versus artifact-derived store IDs | — | M5 |
+| DEC-021 | Deferred | Pkg-native repository signing format is outside the v1 support claim | ADR-020 | Post-v1 |
+| DEC-022 | Deferred | Final content-addressed store identity semantics are outside the v1 support claim | ADR-020 | Post-v1 |
+| DEC-023 | Accepted | Agent-first architecture and native MCP server | ADR-019 | M4-M5 |
 
 ## Rule
 

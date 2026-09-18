@@ -1,13 +1,12 @@
 # `pkg install`
 
-Install a package from a repository name, local artifact, or explicit URL.
+Install a package from a repository name or local artifact.
 
 ## Syntax
 
 ```bash
 pkg install <package>
 pkg install <path>
-pkg install <url>
 ```
 
 Examples:
@@ -15,7 +14,6 @@ Examples:
 ```bash
 pkg install ripgrep
 pkg install ./vendor.deb
-pkg install https://example.org/vendor.deb
 pkg install ripgrep --dry-run
 ```
 
@@ -57,13 +55,9 @@ local file
  -> transaction
 ```
 
-### Explicit URL
-
-```bash
-pkg install https://vendor.example/app.deb
-```
-
-The URL is provenance, not package identity. The artifact receives a local cryptographic digest before promotion.
+Explicit URL installation remains outside the current command contract. It
+requires a separate provenance and verification path before documentation can
+promise it.
 
 ## High-level flow
 
@@ -111,7 +105,10 @@ Before mutation, `pkg` should know:
 - conflicts;
 - unsupported integrations.
 
-`--dry-run` stops after producing this plan.
+`--dry-run` stops after producing this plan. It does not synchronize catalogs,
+download missing artifacts, create a database or write a temporary extraction.
+When required bytes are absent, it reports an incomplete preview and exits
+unsuccessfully for a requested verified plan.
 
 ## Package script policy
 
@@ -152,6 +149,23 @@ error: command `foo` is already provided by package A
 ```
 
 The command fails unless an explicit future conflict-selection mechanism is used.
+
+The same conflict applies to an unmanaged file or a symlink whose target differs
+from recorded ownership. Updates only replace previously owned links. Removal
+preserves user replacements at those paths.
+
+The current local implementation rejects invalid ELF files and unresolved
+`DT_NEEDED` libraries before store promotion. Package-local libraries count as
+resolved only through the binary's effective RPATH/RUNPATH (for example,
+`$ORIGIN/../lib`); merely placing a library under `usr/lib` does not make it
+visible to the host loader. This does not constitute complete symbol-version or
+ABI resolution. Payload links must resolve within the extracted package;
+dangling and cyclic links are currently unsupported. Version strings
+must be nonempty, at most 128 bytes, and contain only ASCII letters, digits,
+`.`, `+`, `~`, `:`, and `-`.
+
+Cached remote artifacts are rechecked against the catalog's size and SHA-256.
+New downloads become cache entries only after verification and atomic promotion.
 
 ## Postconditions
 

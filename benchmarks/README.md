@@ -8,14 +8,15 @@ O objetivo principal é produzir números **reproduzíveis e auditáveis**, não
 
 ```text
 benchmarks/
-├── README.md
-├── run.sh
-├── cli_commands.sh
-├── fallback_bench.py
-├── merge_results.py
-├── resource_bench.py
-├── plot.py
-└── results/
+├── README.md             # Este guia completo de metodologia e execução
+├── run.sh                # Script principal de execução dos testes
+├── run-gates.sh          # Baseline dos gates de parsing/solver/extraction/recovery
+├── cli_commands.sh       # Suite de comandos CLI (dry-run, list, info)
+├── fallback_bench.py     # Executor de benchmark nativo em Python
+├── merge_results.py      # Agregador de resultados e relatórios percentis
+├── resource_bench.py     # Coletor de métricas de CPU, RSS e I/O
+├── plot.py               # Gerador de gráficos (gráfico ASCII e PNG)
+└── results/              # Pasta onde os relatórios (Markdown, JSON, PNG) são salvos
     └── <timestamp>-<package>-<suite>-<warm|cold>/
         ├── environment.txt
         ├── results.json
@@ -97,6 +98,16 @@ Cold-cache:
 - `--resource-runs N`: amostras adicionais para CPU/RSS/I/O, padrão 5;
 - `--no-resources`: desativa a passagem com `/usr/bin/time -v`;
 - `--output-dir DIR`: altera a raiz dos resultados.
+
+### Baseline dos gates de release (`run-gates.sh`)
+
+Para medir as categorias exigidas pelo Gate M5 com fixtures locais e raízes temporárias isoladas:
+
+```bash
+./benchmarks/run-gates.sh --runs 10 --warmup 2
+```
+
+O driver mede parsing de índice Debian, resolução, extração, publicação da ativação e recuperação de uma transação incompleta. Os resultados ficam em `benchmarks/results/gates/` e incluem JSON bruto e tabela Markdown.
 
 ## Suite de comandos do CLI
 

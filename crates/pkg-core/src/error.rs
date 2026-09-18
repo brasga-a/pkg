@@ -38,6 +38,12 @@ pub enum Error {
     #[error("Incompatible host: {0}")]
     IncompatibleHost(String),
 
+    #[error("Network error: {0}")]
+    Network(String),
+
+    #[error("Parse error: {0}")]
+    Parse(String),
+
     /// Binary command name collision with an already active package.
     #[error(
         "Activation conflict: command '{command}' is already provided by package '{existing_package}'"
@@ -83,9 +89,19 @@ pub enum Error {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// Dependency resolution failed with human-readable explanation chain (INV-020).
+    #[error("Dependency resolution failed:\n{0}")]
+    ResolutionFailed(Box<crate::resolver::explanation::ExplanationChain>),
+
     /// A generic internal domain error.
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+impl From<crate::resolver::ResolutionError> for Error {
+    fn from(err: crate::resolver::ResolutionError) -> Self {
+        Self::ResolutionFailed(Box::new(err.chain))
+    }
 }
 
 /// A specialized Result type for `pkg-core` operations.

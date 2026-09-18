@@ -49,6 +49,13 @@ A safe sequence is:
 
 This improves rollback/recovery.
 
+The current implementation preserves a store object while any active or
+retained generation or runtime manifest references it. Removing from one
+profile preserves other profiles' package records and executable links. Links
+are unlinked only when their targets still match recorded ownership; user
+replacements remain untouched. An explicit `pkg gc` run may collect only an
+object that is no longer referenced by any retained state.
+
 ## Configuration
 
 MVP packages live inside pkg-owned stores, so package-owned configuration inside the store disappears with the store object.

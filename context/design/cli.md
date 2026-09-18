@@ -5,15 +5,17 @@ Temporary binary name: `pkg`.
 ## Initial commands
 
 ```bash
-pkg install <name|path|url>
+pkg install <name|path>
 pkg remove <name>
 pkg list
 pkg info <name>
 pkg search <query>
+pkg repo sync
 pkg update
 pkg upgrade
 pkg repo list
 pkg repo add
+pkg repo update # alias of pkg repo sync
 pkg doctor
 pkg gc
 ```

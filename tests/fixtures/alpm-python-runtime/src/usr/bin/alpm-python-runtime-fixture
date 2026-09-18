@@ -1,0 +1,7 @@
+#!/usr/bin/python
+import sys
+import pkg_fixture_module
+
+print(f"MODULE_VAL={pkg_fixture_module.GREETING}")
+for arg in sys.argv[1:]:
+    print(f"ARG={arg}")

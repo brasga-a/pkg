@@ -21,6 +21,11 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+indicatif = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
@@ -29,6 +34,12 @@ tempfile = { workspace = true }
 ar = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+rpm = { workspace = true }
+zstd = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [[test]]
 name = "cli_smoke"
@@ -45,3 +56,79 @@ path = "../../tests/gate_m1_b_store.rs"
 [[test]]
 name = "gate_m1_c_transaction"
 path = "../../tests/gate_m1_c_transaction.rs"
+
+[[test]]
+name = "gate_m2_repository"
+path = "../../tests/gate_m2_repository.rs"
+
+[[test]]
+name = "gate_m3_resolver"
+path = "../../tests/gate_m3_resolver.rs"
+
+[[test]]
+name = "review_regressions"
+path = "../../tests/review_regressions.rs"
+
+[[test]]
+name = "gate_multi_repo"
+path = "../../tests/gate_multi_repo.rs"
+
+[[test]]
+name = "test_install_options"
+path = "../../tests/test_install_options.rs"
+
+[[test]]
+name = "test_download_progress"
+path = "../../tests/test_download_progress.rs"
+
+[[test]]
+name = "test_cli_improvements"
+path = "../../tests/test_cli_improvements.rs"
+
+[[test]]
+name = "test_dependency_contextual_resolution"
+path = "../../tests/test_dependency_contextual_resolution.rs"
+
+[[test]]
+name = "test_rpm_noarch"
+path = "../../tests/test_rpm_noarch.rs"
+
+[[test]]
+name = "test_runtime_launcher"
+path = "../../tests/test_runtime_launcher.rs"
+
+[[test]]
+name = "test_interactive_install"
+path = "../../tests/test_interactive_install.rs"
+
+[[test]]
+name = "test_text_relocation"
+path = "../../tests/test_text_relocation.rs"
+
+[[test]]
+name = "test_profiles"
+path = "../../tests/test_profiles.rs"
+
+[[test]]
+name = "test_cli_json"
+path = "../../tests/test_cli_json.rs"
+
+[[test]]
+name = "test_mcp"
+path = "../../tests/test_mcp.rs"
+
+[[test]]
+name = "test_upgrade_plan"
+path = "../../tests/test_upgrade_plan.rs"
+
+[[test]]
+name = "test_fault_injection"
+path = "../../tests/test_fault_injection.rs"
+
+[[test]]
+name = "test_host_integration"
+path = "../../tests/test_host_integration.rs"
+
+[[test]]
+name = "test_upgrade_apply"
+path = "../../tests/test_upgrade_apply.rs"

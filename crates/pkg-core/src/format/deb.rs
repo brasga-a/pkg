@@ -4,15 +4,16 @@
 //! without invoking `dpkg` (INV-001, ADR-005, Gate M1-A).
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
 use crate::domain::capability::{Capability, Dependency};
+use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstraint, VersionOp};
 use crate::domain::package::{
     Architecture, ArtifactDigest, LifecycleScript, NormalizedPackage, PackageEntry, PackageFormat,
-    PackageName, PackageVersion,
+    PackageName, PackageVersion, VersionedCapability,
 };
 use crate::error::{Error, Result};
 use crate::format::{ArtifactAdapter, ExtractionLimits, ExtractionReport};
@@ -22,6 +23,25 @@ use crate::format::{ArtifactAdapter, ExtractionLimits, ExtractionReport};
 pub struct DebAdapter;
 
 impl DebAdapter {
+    fn create_payload_dirs(root: &Path, relative: &Path) -> Result<()> {
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(Error::SecurityViolation(format!(
+                        "Non-directory payload parent: {}",
+                        current.display()
+                    )));
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)?,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a new `DebAdapter`.
     #[must_use]
     pub const fn new() -> Self {
@@ -129,6 +149,164 @@ impl DebAdapter {
         deps
     }
 
+    fn parse_single_debian_constraint(raw_item: &str) -> Option<Constraint> {
+        let (name, ver_constraint) = Self::parse_debian_name_version(raw_item)?;
+
+        if name.starts_with("lib") && (name.contains(".so") || name.ends_with(".so")) {
+            Some(Constraint::Capability(CapabilityConstraint {
+                identifier: format!("lib:{name}"),
+                version: ver_constraint,
+                original_expression: raw_item.to_string(),
+            }))
+        } else if let Ok(pkg_name) = PackageName::new(name) {
+            Some(Constraint::Package {
+                name: pkg_name,
+                version: ver_constraint,
+                ecosystem: "debian".to_string(),
+                original_expression: raw_item.to_string(),
+            })
+        } else {
+            Some(Constraint::Capability(CapabilityConstraint {
+                identifier: format!("feature:{name}"),
+                version: ver_constraint,
+                original_expression: raw_item.to_string(),
+            }))
+        }
+    }
+
+    fn parse_debian_name_version(raw_item: &str) -> Option<(&str, VersionConstraint)> {
+        let item = raw_item.trim();
+        if item.is_empty() {
+            return None;
+        }
+
+        let (name, ver_op, ver_val) = if let Some(open) = item.find('(') {
+            let name = item[..open].trim();
+            let close = item.find(')').unwrap_or(item.len());
+            let inner = item[open + 1..close].trim();
+            let mut parts = inner.split_whitespace();
+            let op_str = parts.next().unwrap_or("");
+            let ver_str = parts.next().unwrap_or("");
+            let op = match op_str {
+                ">=" => Some(VersionOp::GreaterEqual),
+                "<=" => Some(VersionOp::LessEqual),
+                ">>" | ">" => Some(VersionOp::Greater),
+                "<<" | "<" => Some(VersionOp::Less),
+                "=" => Some(VersionOp::Exact),
+                _ => None,
+            };
+            (name, op, (!ver_str.is_empty()).then_some(ver_str))
+        } else {
+            (item, None, None)
+        };
+
+        let version = match (ver_op, ver_val) {
+            (Some(op), Some(value)) => {
+                VersionConstraint::Relational(op, PackageVersion::new(value))
+            }
+            _ => VersionConstraint::Any,
+        };
+        Some((name, version))
+    }
+
+    pub(crate) fn parse_constraints(fields: &HashMap<String, String>) -> Vec<Constraint> {
+        let mut constraints = Vec::new();
+
+        if let Some(depends_raw) = fields.get("Depends") {
+            for group in depends_raw.split(',') {
+                let group = group.trim();
+                if group.is_empty() {
+                    continue;
+                }
+                let alternatives: Vec<&str> = group
+                    .split('|')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if alternatives.len() > 1 {
+                    let mut any_of = Vec::new();
+                    for alt in alternatives {
+                        if let Some(c) = Self::parse_single_debian_constraint(alt) {
+                            any_of.push(c);
+                        }
+                    }
+                    if !any_of.is_empty() {
+                        constraints.push(Constraint::AnyOf(any_of));
+                    }
+                } else if let Some(alt) = alternatives.first() {
+                    if let Some(c) = Self::parse_single_debian_constraint(alt) {
+                        constraints.push(c);
+                    }
+                }
+            }
+        }
+
+        for field in ["Conflicts", "Breaks"] {
+            if let Some(conflicts_raw) = fields.get(field) {
+                for item in conflicts_raw.split(',') {
+                    let item = item.trim();
+                    if !item.is_empty() {
+                        let (target, version) = Self::parse_debian_name_version(item)
+                            .unwrap_or((item, VersionConstraint::Any));
+                        constraints.push(Constraint::Conflict {
+                            target: target.to_string(),
+                            version,
+                            original_expression: item.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        constraints
+    }
+
+    /// Parses Debian's virtual `Provides` field into normalized capabilities.
+    /// Versioned provides retain their relational version as a capability
+    /// suffix so cross-ecosystem resolution can require exact evidence.
+    pub(crate) fn parse_provides(
+        fields: &HashMap<String, String>,
+    ) -> (Vec<Capability>, Vec<VersionedCapability>) {
+        let Some(raw) = fields.get("Provides") else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut capabilities = Vec::new();
+        let mut versioned = Vec::new();
+        for item in raw.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let name = item.split_whitespace().next().unwrap_or(item);
+            let capability = if name.contains(".so") {
+                Capability::SharedLibrary(name.to_string())
+            } else {
+                Capability::Feature(name.to_string())
+            };
+            let version_text = item
+                .strip_prefix(name)
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim();
+            if let Some(version) = version_text.strip_prefix('=').map(str::trim)
+                && !version.is_empty()
+            {
+                let version = PackageVersion::new(version);
+                if version.validate().is_ok() {
+                    versioned.push(VersionedCapability {
+                        capability,
+                        version,
+                    });
+                    continue;
+                }
+            }
+            capabilities.push(capability);
+        }
+        (capabilities, versioned)
+    }
+
     /// Validates a relative archive path to guarantee it cannot escape the staging root.
     pub fn sanitize_relative_path(path: &Path) -> Result<PathBuf> {
         let mut normalized = PathBuf::new();
@@ -157,46 +335,77 @@ impl DebAdapter {
         Ok(normalized)
     }
 
-    /// Verifies that a symlink target does not escape the destination directory.
+    /// Verifies and sanitizes a symlink target, relativizing absolute targets to the package root.
     fn validate_symlink_target(
         entry_path: &Path,
         target: &Path,
         staging_root: &Path,
-    ) -> Result<()> {
-        if target.is_absolute() {
+    ) -> Result<PathBuf> {
+        super::sanitize_symlink_target(entry_path, target, staging_root)
+    }
+
+    /// Verifies that a materialized symlink (and any chain of links) does not escape `root`.
+    /// Handles existing target files as well as dangling/cross-package targets safely.
+    fn check_link_does_not_escape(root: &Path, relative: &Path, target: &Path) -> Result<()> {
+        let link_path = root.join(relative);
+        let parent = link_path.parent().unwrap_or(root);
+        let mut current = if parent.exists() {
+            fs::canonicalize(parent)?
+        } else {
+            root.to_path_buf()
+        };
+
+        if !current.starts_with(root) {
             return Err(Error::SecurityViolation(format!(
-                "Absolute symlink target rejected: {} -> {}",
-                entry_path.display(),
-                target.display()
+                "Symlink parent directory escapes staging: {}",
+                relative.display()
             )));
         }
 
-        // Resolve target relative to entry parent
-        let entry_dir = entry_path.parent().unwrap_or(Path::new(""));
-        let mut resolved = staging_root.join(entry_dir);
         for comp in target.components() {
             match comp {
-                Component::ParentDir => {
-                    if resolved == staging_root {
-                        return Err(Error::SecurityViolation(format!(
-                            "Escaping symlink rejected: {} points outside staging ({})",
-                            entry_path.display(),
-                            target.display()
-                        )));
-                    }
-                    resolved.pop();
-                }
-                Component::Normal(c) => {
-                    resolved.push(c);
-                }
-                Component::CurDir => {}
                 Component::Prefix(_) | Component::RootDir => {
                     return Err(Error::SecurityViolation(format!(
-                        "Absolute component in symlink target: {}",
+                        "Absolute symlink target rejected: {} -> {}",
+                        relative.display(),
                         target.display()
                     )));
                 }
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if current == root || !current.starts_with(root) {
+                        return Err(Error::SecurityViolation(format!(
+                            "Escaping payload link: {}",
+                            relative.display()
+                        )));
+                    }
+                    current.pop();
+                }
+                Component::Normal(c) => {
+                    let next = current.join(c);
+                    // If next exists and is a symlink, resolve it to detect chained escapes
+                    if next.is_symlink() {
+                        if let Ok(canon) = fs::canonicalize(&next) {
+                            if !canon.starts_with(root) {
+                                return Err(Error::SecurityViolation(format!(
+                                    "Escaping payload link: {}",
+                                    relative.display()
+                                )));
+                            }
+                            current = canon;
+                            continue;
+                        }
+                    }
+                    current = next;
+                }
             }
+        }
+
+        if !current.starts_with(root) {
+            return Err(Error::SecurityViolation(format!(
+                "Escaping payload link: {}",
+                relative.display()
+            )));
         }
 
         Ok(())
@@ -226,6 +435,11 @@ impl ArtifactAdapter for DebAdapter {
                 .to_string();
 
             if raw_id == "debian-binary" {
+                if debian_binary_found {
+                    return Err(Error::MalformedArchive(
+                        "Duplicate 'debian-binary' entry in ar container".into(),
+                    ));
+                }
                 let mut buf = String::new();
                 entry.read_to_string(&mut buf)?;
                 let trimmed = buf.trim();
@@ -236,10 +450,20 @@ impl ArtifactAdapter for DebAdapter {
                 }
                 debian_binary_found = true;
             } else if raw_id.starts_with("control.tar") {
+                if control_tar_data.is_some() {
+                    return Err(Error::MalformedArchive(
+                        "Duplicate 'control.tar.*' entry in ar container".into(),
+                    ));
+                }
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
                 control_tar_data = Some((raw_id, bytes));
             } else if raw_id.starts_with("data.tar") {
+                if data_tar_data.is_some() {
+                    return Err(Error::MalformedArchive(
+                        "Duplicate 'data.tar.*' entry in ar container".into(),
+                    ));
+                }
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
                 data_tar_data = Some((raw_id, bytes));
@@ -320,6 +544,7 @@ impl ArtifactAdapter for DebAdapter {
             Error::MalformedArchive("Missing 'Version' field in control file".into())
         })?;
         let version = PackageVersion::new(version_raw);
+        version.validate()?;
 
         let arch_raw = fields.get("Architecture").ok_or_else(|| {
             Error::MalformedArchive("Missing 'Architecture' field in control file".into())
@@ -336,11 +561,17 @@ impl ArtifactAdapter for DebAdapter {
             .get("Depends")
             .map(|d| Self::parse_dependencies(d))
             .unwrap_or_default();
+        let constraints = Self::parse_constraints(&fields);
 
         // Parse data.tar.* entries for inventory
         let mut data_tar = Self::make_tar_reader(&data_name, Box::new(Cursor::new(data_bytes)))?;
         let mut entries = Vec::new();
-        let mut provides = Vec::new();
+        // Preserve virtual shared-library capabilities from the control
+        // metadata.  A `Provides: libfoo.so.1` entry is a library capability,
+        // not an unrelated feature token; this is what permits a verified
+        // consumer from another ecosystem to reuse the selected provider.
+        let (mut provides, versioned_provides) = Self::parse_provides(&fields);
+        let mut seen_paths = HashSet::new();
 
         let data_entries = data_tar.entries().map_err(|e| {
             Error::MalformedArchive(format!("Failed to read data.tar entries: {e}"))
@@ -358,6 +589,12 @@ impl ArtifactAdapter for DebAdapter {
             let relative_path = Self::sanitize_relative_path(&raw_path)?;
             if relative_path.as_os_str().is_empty() {
                 continue;
+            }
+            if !seen_paths.insert(relative_path.clone()) {
+                return Err(Error::MalformedArchive(format!(
+                    "Duplicate payload path: {}",
+                    relative_path.display()
+                )));
             }
             let header = entry.header();
             let entry_type = header.entry_type();
@@ -382,6 +619,15 @@ impl ArtifactAdapter for DebAdapter {
                 }
             }
 
+            // If shared library, inventory SharedLibrary capability
+            if !is_dir {
+                if let Some(filename) = relative_path.file_name().and_then(|n| n.to_str()) {
+                    if filename.contains(".so") {
+                        provides.push(Capability::SharedLibrary(filename.to_string()));
+                    }
+                }
+            }
+
             entries.push(PackageEntry {
                 relative_path,
                 is_dir,
@@ -401,7 +647,9 @@ impl ArtifactAdapter for DebAdapter {
             size_bytes,
             description,
             dependencies,
+            constraints,
             provides,
+            versioned_provides,
             scripts,
             entries,
             installed_size,
@@ -430,10 +678,14 @@ impl ArtifactAdapter for DebAdapter {
                 .to_string();
 
             if raw_id.starts_with("data.tar") {
+                if data_tar_data.is_some() {
+                    return Err(Error::MalformedArchive(
+                        "Duplicate 'data.tar.*' entry in ar container".into(),
+                    ));
+                }
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
                 data_tar_data = Some((raw_id, bytes));
-                break;
             }
         }
 
@@ -447,6 +699,8 @@ impl ArtifactAdapter for DebAdapter {
         let mut total_bytes = 0u64;
         let mut entries_count = 0usize;
         let mut symlinks_count = 0usize;
+        let mut seen = HashSet::new();
+        let mut pending_links = Vec::new();
 
         fs::create_dir_all(destination)?;
 
@@ -475,10 +729,22 @@ impl ArtifactAdapter for DebAdapter {
                 continue;
             }
             let target_path = destination.join(&relative_path);
+            if !seen.insert(relative_path.clone()) {
+                return Err(Error::MalformedArchive(format!(
+                    "Duplicate payload path: {}",
+                    relative_path.display()
+                )));
+            }
 
             let (is_dir, is_symlink, symlink_target_opt, file_size, file_mode) = {
                 let header = entry.header();
                 let entry_type = header.entry_type();
+                if !entry_type.is_dir() && !entry_type.is_symlink() && !entry_type.is_file() {
+                    return Err(Error::MalformedArchive(format!(
+                        "Unsupported payload entry type: {}",
+                        relative_path.display()
+                    )));
+                }
                 let link_name = if entry_type.is_symlink() {
                     let link = header
                         .link_name()
@@ -502,26 +768,18 @@ impl ArtifactAdapter for DebAdapter {
             };
 
             if is_dir {
-                fs::create_dir_all(&target_path)?;
+                Self::create_payload_dirs(destination, &relative_path)?;
             } else if is_symlink {
                 symlinks_count += 1;
                 let link_name = symlink_target_opt
                     .ok_or_else(|| Error::MalformedArchive("Missing symlink target".into()))?;
 
-                Self::validate_symlink_target(&relative_path, &link_name, destination)?;
+                let sanitized_target =
+                    Self::validate_symlink_target(&relative_path, &link_name, destination)?;
 
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-
-                // If a symlink or file already exists at target, remove it first
-                if target_path.is_symlink() || target_path.exists() {
-                    let _ = fs::remove_file(&target_path);
-                }
-
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&link_name, &target_path)?;
-
+                // Materialize links only after all regular files, so archive order
+                // cannot redirect writes through an earlier symlink.
+                pending_links.push((relative_path.clone(), sanitized_target));
                 extracted_files.push(relative_path);
             } else {
                 if file_size > limits.max_single_file_bytes {
@@ -544,11 +802,14 @@ impl ArtifactAdapter for DebAdapter {
                     )));
                 }
 
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent)?;
+                if let Some(parent) = relative_path.parent() {
+                    Self::create_payload_dirs(destination, parent)?;
                 }
 
-                let mut out_file = File::create(&target_path)?;
+                let mut out_file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target_path)?;
                 io::copy(&mut entry, &mut out_file)?;
 
                 #[cfg(unix)]
@@ -560,6 +821,17 @@ impl ArtifactAdapter for DebAdapter {
 
                 extracted_files.push(relative_path);
             }
+        }
+
+        for (relative, target) in &pending_links {
+            if let Some(parent) = relative.parent() {
+                Self::create_payload_dirs(destination, parent)?;
+            }
+            std::os::unix::fs::symlink(target, destination.join(relative))?;
+        }
+        let root = fs::canonicalize(destination)?;
+        for (relative, target) in &pending_links {
+            Self::check_link_does_not_escape(&root, relative, target)?;
         }
 
         Ok(ExtractionReport {
@@ -616,5 +888,75 @@ mod tests {
                 .unwrap()
                 .contains("multiline description")
         );
+    }
+
+    #[test]
+    fn versioned_breaks_preserves_the_version_constraint() {
+        let fields = HashMap::from([(
+            "Breaks".to_string(),
+            "libvirt-clients (<< 10.6.0-2~)".to_string(),
+        )]);
+        let constraints = DebAdapter::parse_constraints(&fields);
+        assert!(matches!(
+            constraints.as_slice(),
+            [Constraint::Conflict {
+                target,
+                version: VersionConstraint::Relational(VersionOp::Less, value),
+                ..
+            }] if target == "libvirt-clients" && value.as_str() == "10.6.0-2~"
+        ));
+    }
+
+    #[test]
+    fn test_sanitize_symlink_target_relativizes_absolute_targets() {
+        let staging = Path::new("/tmp/staging");
+
+        // 1. Cross-directory link like r-base-core
+        let res = super::super::sanitize_symlink_target(
+            Path::new("usr/lib/R/etc/Makeconf"),
+            Path::new("/etc/R/Makeconf"),
+            staging,
+        )
+        .unwrap();
+        assert_eq!(res, PathBuf::from("../../../../etc/R/Makeconf"));
+
+        // 2. Same-directory link
+        let res2 = super::super::sanitize_symlink_target(
+            Path::new("usr/bin/foo"),
+            Path::new("/usr/bin/bar"),
+            staging,
+        )
+        .unwrap();
+        assert_eq!(res2, PathBuf::from("bar"));
+
+        // 3. Root-level link
+        let res3 = super::super::sanitize_symlink_target(
+            Path::new("lib64"),
+            Path::new("/usr/lib64"),
+            staging,
+        )
+        .unwrap();
+        assert_eq!(res3, PathBuf::from("usr/lib64"));
+    }
+
+    #[test]
+    fn test_sanitize_symlink_target_rejects_escaping_targets() {
+        let staging = Path::new("/tmp/staging");
+
+        // Absolute target trying to escape package root with ParentDir
+        let err1 = super::super::sanitize_symlink_target(
+            Path::new("usr/bin/evil"),
+            Path::new("/../../etc/shadow"),
+            staging,
+        );
+        assert!(matches!(err1, Err(Error::SecurityViolation(_))));
+
+        // Relative target trying to escape staging root
+        let err2 = super::super::sanitize_symlink_target(
+            Path::new("usr/bin/evil"),
+            Path::new("../../../../etc/shadow"),
+            staging,
+        );
+        assert!(matches!(err2, Err(Error::SecurityViolation(_))));
     }
 }

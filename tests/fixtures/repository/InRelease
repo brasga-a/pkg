@@ -1,0 +1,22 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Suite: testsuite
+SHA256:
+ 0da50e2cbd120b9b60cedf7b16f0c3f7b29bc5dfc8f158791e0772d7251d9dd7 157 main/binary-amd64/Packages.gz
+ 0da50e2cbd120b9b60cedf7b16f0c3f7b29bc5dfc8f158791e0772d7251d9dd7 157 main/binary-arm64/Packages.gz
+ 0da50e2cbd120b9b60cedf7b16f0c3f7b29bc5dfc8f158791e0772d7251d9dd7 157 main/binary-armhf/Packages.gz
+ 0da50e2cbd120b9b60cedf7b16f0c3f7b29bc5dfc8f158791e0772d7251d9dd7 157 main/binary-i386/Packages.gz
+ 0da50e2cbd120b9b60cedf7b16f0c3f7b29bc5dfc8f158791e0772d7251d9dd7 157 main/binary-riscv64/Packages.gz
+ fb2b0d0b03b4fe9a7c9c2b44116d7749933e01c11eb27712ed7582418e466f3f 216 main/binary-amd64/Packages.xz
+ fb2b0d0b03b4fe9a7c9c2b44116d7749933e01c11eb27712ed7582418e466f3f 216 main/binary-arm64/Packages.xz
+ fb2b0d0b03b4fe9a7c9c2b44116d7749933e01c11eb27712ed7582418e466f3f 216 main/binary-armhf/Packages.xz
+ fb2b0d0b03b4fe9a7c9c2b44116d7749933e01c11eb27712ed7582418e466f3f 216 main/binary-i386/Packages.xz
+ fb2b0d0b03b4fe9a7c9c2b44116d7749933e01c11eb27712ed7582418e466f3f 216 main/binary-riscv64/Packages.xz
+
+-----BEGIN PGP SIGNATURE-----
+
+wk4EARYIAAAAAJJPAQDdJNyCX23hxO7hGYOtRLMcQrBfvOZWq2JTvRZjMwTRxAD8
+DXLTBVGJv/I9FbXreuiSoUOZD8FDgZwYWOKYZ56+AAg=
+=yWc7
+-----END PGP SIGNATURE-----

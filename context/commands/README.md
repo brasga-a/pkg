@@ -13,18 +13,30 @@ The CLI is intentionally narrower than the internal architecture. A documented c
 | [`pkg list`](list.md) | List locally installed packages and active versions. |
 | [`pkg info`](info.md) | Show package metadata, provenance, compatibility and local state. |
 | [`pkg search`](search.md) | Search synchronized repository catalogs. |
-| [`pkg update`](update.md) | Refresh repository metadata and snapshots. |
+| [`pkg repo sync`](sync.md) | Refresh repository metadata and build snapshots. |
+| [`pkg sync`](sync.md) | Compatibility alias for `pkg repo sync`. |
 | [`pkg upgrade`](upgrade.md) | Plan and apply upgrades for installed packages. |
+| [`pkg update`](update.md) | Compatibility alias for `pkg upgrade`. |
 | [`pkg repo list`](repo-list.md) | List configured repositories and sync/trust status. |
 | [`pkg repo add`](repo-add.md) | Add a repository configuration. |
+| [`pkg repo update`](sync.md) | Compatibility alias for `pkg repo sync`. |
 | [`pkg doctor`](doctor.md) | Diagnose state/store/profile consistency and compatibility problems. |
 | [`pkg gc`](gc.md) | Remove unreachable store objects and stale cache entries according to policy. |
+| [`pkg integrate`](integrate.md) | Explicitly expose supported desktop, icon and MIME resources in user space. |
+| [`pkg deintegrate`](integrate.md) | Remove only host integration links owned by the selected package. |
+| `pkg rollback` | Select a retained immutable profile generation and restore its recorded state. |
+| `pkg run` | Execute a command through its recorded per-command runtime environment. |
+| `pkg migrate` | Capture legacy activation as explicitly unverified evidence for later re-planning. |
+
+| `pkg profile create|list|drop` | Manage isolated task profiles. |
+| `pkg query-command <command>` | Find installed providers of a command. |
+| `pkg mcp` | Serve the native JSON-RPC tool interface over STDIO. |
 
 ## Global CLI principles
 
 - Mutating commands must support `--dry-run` where a plan exists.
 - Network operations must support an offline/fail-closed mode where meaningful.
-- Human output is the default; machine-readable output can be added later without making internal serialization stable.
+- Human output is the default; `--json` and MCP expose typed machine-readable contracts.
 - Errors must be categorized, not collapsed into a single generic failure.
 - Commands never execute package metadata through a shell.
 - A command succeeds only after its durable/visible postconditions are met.
@@ -39,7 +51,7 @@ The CLI is intentionally narrower than the internal architecture. A documented c
 --quiet
 --offline
 --profile <name>
---json            # future stable-ish machine output, not internal plan schema
+--json            # one deterministic machine-readable result document
 --dry-run         # only for commands that create a plan
 ```
 

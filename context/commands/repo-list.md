@@ -35,7 +35,7 @@ This command does not refresh repositories.
 Use:
 
 ```bash
-pkg update
+pkg repo sync # or pkg sync / pkg repo update
 ```
 
 for network synchronization.

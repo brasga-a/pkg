@@ -1,0 +1,13 @@
+{
+  "name": "pkg-atlantic-sh-worker",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker for pkg.atlantic.sh installer and release router",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.109.0"
+  }
+}

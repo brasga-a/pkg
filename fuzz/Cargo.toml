@@ -1,0 +1,27 @@
+[package]
+name = "pkg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pkg-core = { path = "../crates/pkg-core" }
+tempfile = "3.17"
+
+[[bin]]
+name = "metadata"
+path = "fuzz_targets/metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extraction"
+path = "fuzz_targets/extraction.rs"
+test = false
+doc = false
+bench = false

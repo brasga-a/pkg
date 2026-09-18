@@ -236,3 +236,28 @@ fn test_normalized_metadata_produced_without_dpkg() {
         vec![pkg_core::domain::Capability::Executable("rg".to_string())]
     );
 }
+
+#[test]
+fn test_dangling_or_cross_package_symlinks_within_staging_accepted() {
+    let temp = tempdir().unwrap();
+    let deb = temp.path().join("dangling_link.deb");
+
+    // E.g. virt-manager having usr/share/doc/virt-manager/NEWS.md.gz -> ../virtinst/NEWS.md.gz
+    DebPackageBuilder::new("virt-manager")
+        .file("usr/share/doc/virt-manager/README", b"readme", 0o644)
+        .symlink(
+            "usr/share/doc/virt-manager/NEWS.md.gz",
+            "../virtinst/NEWS.md.gz",
+        )
+        .write_to(&deb)
+        .unwrap();
+
+    let adapter = DebAdapter::new();
+    let dest = temp.path().join("extract");
+    let extract_res = adapter.extract_payload(&deb, &dest, &ExtractionLimits::default());
+    assert!(
+        extract_res.is_ok(),
+        "Non-escaping symlinks pointing to cross-package/dangling targets must be accepted: {:?}",
+        extract_res.err()
+    );
+}

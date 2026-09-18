@@ -8,7 +8,18 @@ Resolve newer acceptable versions for installed packages and apply a transaction
 pkg upgrade
 pkg upgrade <package>
 pkg upgrade --dry-run
+pkg upgrade --jobs 4
+# alias:
+pkg update
 ```
+
+## Concurrent acquisition
+
+`--jobs <N>` accepts values from 1 to 16 (default: 4). Upgrade roots and each
+already discovered dependency frontier are acquired by Tokio tasks bounded by
+that value and deduplicated by SHA-256 digest. Network completion order never
+defines resolution, installation or state writes; `--jobs 1` keeps a
+reproducible serial acquisition mode.
 
 ## Precondition
 
@@ -17,8 +28,8 @@ Repository snapshots should already exist. The command may warn that metadata is
 A clean mental model is:
 
 ```bash
+pkg repo sync
 pkg update
-pkg upgrade
 ```
 
 ## Flow
@@ -39,9 +50,9 @@ installed set
 
 ## Rollback property
 
-Because old store objects are not mutated in place, upgrade architecture should preserve enough state for future profile rollback.
-
-Rollback UX is deferred until profile generations are fully accepted.
+Because old store objects are not mutated in place, the implementation retains
+enough state for profile rollback. Use `pkg rollback` to select the previous
+generation after a successful upgrade.
 
 ## Dependency changes
 
