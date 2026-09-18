@@ -1271,7 +1271,9 @@ async fn run() -> Result<()> {
                                     r.id, r.distro, r.format, status, desc
                                 );
                             }
-                            println!("\nTip: Run `pkg repo add <id>` to enable an official repository.");
+                            println!(
+                                "\nTip: Run `pkg repo add <id>` to enable an official repository."
+                            );
                         }
                         return Ok(());
                     }

@@ -1642,7 +1642,9 @@ impl Engine {
                 Ok(Ok((repo, packages))) => successes.push((repo, packages)),
                 Ok(Err(err)) => failures.push(err),
                 Err(join_err) => {
-                    failures.push(Error::Internal(format!("Repository task join error: {join_err}")));
+                    failures.push(Error::Internal(format!(
+                        "Repository task join error: {join_err}"
+                    )));
                 }
             }
         }

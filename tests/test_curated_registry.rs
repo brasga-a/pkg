@@ -210,9 +210,9 @@ fn test_cli_repo_add_curated_id() {
     let assert = cmd
         .args(["--data-dir", data_dir, "repo", "add", "arch-multilib"])
         .assert();
-    assert
-        .success()
-        .stdout(predicates::str::contains("Successfully added repository 'arch-multilib'"));
+    assert.success().stdout(predicates::str::contains(
+        "Successfully added repository 'arch-multilib'",
+    ));
 
     // 2. Verify repositories.toml was created and contains arch-multilib
     let config_path = temp.path().join("repositories.toml");
@@ -234,7 +234,13 @@ fn test_cli_repo_add_curated_id() {
     // 4. Adding non-existent curated ID should fail informatively
     let mut invalid_cmd = Command::cargo_bin("pkg").unwrap();
     invalid_cmd
-        .args(["--data-dir", data_dir, "repo", "add", "non-existent-distro-repo"])
+        .args([
+            "--data-dir",
+            data_dir,
+            "repo",
+            "add",
+            "non-existent-distro-repo",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("not in the curated registry"));
@@ -288,7 +294,10 @@ async fn test_resilient_parallel_sync() {
     };
 
     // Parallel update should NOT fail the entire batch: working-arch must be saved
-    let total = engine.update(&config).await.expect("Resilient sync should succeed when at least one repo succeeds");
+    let total = engine
+        .update(&config)
+        .await
+        .expect("Resilient sync should succeed when at least one repo succeeds");
     assert_eq!(total, 1);
 
     // Search verifies working repo was committed into SQLite
@@ -299,17 +308,15 @@ async fn test_resilient_parallel_sync() {
 
     // Now test fail-closed behavior: when ALL repos fail, engine.update must return Err
     let all_broken_config = RepositoriesConfig {
-        repositories: vec![
-            RepositoryConfig {
-                id: "broken-1".to_string(),
-                format: "alpm".to_string(),
-                url: "http://127.0.0.1:1".to_string(),
-                distribution: "core".to_string(),
-                components: vec![],
-                public_key_path: None,
-                priority: None,
-            },
-        ],
+        repositories: vec![RepositoryConfig {
+            id: "broken-1".to_string(),
+            format: "alpm".to_string(),
+            url: "http://127.0.0.1:1".to_string(),
+            distribution: "core".to_string(),
+            components: vec![],
+            public_key_path: None,
+            priority: None,
+        }],
     };
 
     let fail_result = engine.update(&all_broken_config).await;

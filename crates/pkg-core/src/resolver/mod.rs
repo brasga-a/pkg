@@ -512,7 +512,10 @@ impl Resolver {
         }
 
         // Check host native packages matching ecosystem
-        if let Some(host_pkg) = self.host.provides_package(name.as_str(), version_constraint, ecosystem) {
+        if let Some(host_pkg) =
+            self.host
+                .provides_package(name.as_str(), version_constraint, ecosystem)
+        {
             host_satisfied.push(CapabilityEvidence {
                 capability: Capability::Feature(name.to_string()),
                 version: Some(host_pkg.version.clone()),
@@ -1472,7 +1475,10 @@ mod tests {
             .expect("virtual package requirement should be satisfied by repository package with Provides");
 
         assert_eq!(plan.packages_to_install.len(), 1);
-        assert_eq!(plan.packages_to_install[0].name.as_str(), "dconf-gsettings-backend");
+        assert_eq!(
+            plan.packages_to_install[0].name.as_str(),
+            "dconf-gsettings-backend"
+        );
     }
 
     #[test]

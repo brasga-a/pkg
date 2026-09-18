@@ -26,7 +26,11 @@ fn test_cli_install_with_no_deps_flag() {
     DebPackageBuilder::new("standalone-app")
         .architecture("amd64")
         .depends("missing-lib-dependency-xyz (>= 2.0.0)")
-        .file("usr/bin/standalone-tool", b"#!/bin/sh\necho standalone\n", 0o755)
+        .file(
+            "usr/bin/standalone-tool",
+            b"#!/bin/sh\necho standalone\n",
+            0o755,
+        )
         .write_to(&artifact)
         .unwrap();
 
@@ -81,7 +85,11 @@ fn test_cli_install_with_skip_deps_alias() {
     DebPackageBuilder::new("standalone-app2")
         .architecture("amd64")
         .depends("missing-lib-dependency-xyz (>= 2.0.0)")
-        .file("usr/bin/standalone-tool2", b"#!/bin/sh\necho standalone2\n", 0o755)
+        .file(
+            "usr/bin/standalone-tool2",
+            b"#!/bin/sh\necho standalone2\n",
+            0o755,
+        )
         .write_to(&artifact)
         .unwrap();
 

@@ -139,7 +139,8 @@ impl HostEvidence {
         target_ecosystem: &str,
     ) -> Option<&HostPackageEvidence> {
         if let Some(pkg) = self.host_packages.get(name) {
-            if target_ecosystem.is_empty() || target_ecosystem.eq_ignore_ascii_case(&pkg.ecosystem) {
+            if target_ecosystem.is_empty() || target_ecosystem.eq_ignore_ascii_case(&pkg.ecosystem)
+            {
                 let eco = match pkg.ecosystem.as_str() {
                     "debian" | "ubuntu" => VersionEcosystem::Debian,
                     "rpm" | "fedora" | "rhel" | "suse" | "centos" => VersionEcosystem::Rpm,
@@ -537,32 +538,35 @@ fn detect_dpkg_status_at(status_path: &Path, builder: &mut HostEvidenceBuilder) 
     let mut is_installed = false;
     let mut provides_raw: Vec<String> = Vec::new();
 
-    let mut commit_package = |name: Option<String>,
-                              version: Option<String>,
-                              installed: bool,
-                              provides: &[String]| {
-        if installed && let (Some(name), Some(version)) = (name, version) {
-            let mut provides_caps = Vec::new();
-            for prov in provides {
-                let clean = prov.split('(').next().unwrap_or(prov).trim();
-                if clean.is_empty() {
-                    continue;
+    let mut commit_package =
+        |name: Option<String>, version: Option<String>, installed: bool, provides: &[String]| {
+            if installed && let (Some(name), Some(version)) = (name, version) {
+                let mut provides_caps = Vec::new();
+                for prov in provides {
+                    let clean = prov.split('(').next().unwrap_or(prov).trim();
+                    if clean.is_empty() {
+                        continue;
+                    }
+                    if clean.contains(".so") {
+                        builder.add_library_in_place(clean, None, &[]);
+                        provides_caps.push(Capability::SharedLibrary(clean.to_string()));
+                    } else {
+                        builder.add_feature_in_place(clean);
+                        provides_caps.push(Capability::Feature(clean.to_string()));
+                    }
                 }
-                if clean.contains(".so") {
-                    builder.add_library_in_place(clean, None, &[]);
-                    provides_caps.push(Capability::SharedLibrary(clean.to_string()));
-                } else {
-                    builder.add_feature_in_place(clean);
-                    provides_caps.push(Capability::Feature(clean.to_string()));
-                }
+                builder.add_host_package_in_place(&name, &version, "debian", provides_caps);
             }
-            builder.add_host_package_in_place(&name, &version, "debian", provides_caps);
-        }
-    };
+        };
 
     for line in reader.lines().map_while(Result::ok) {
         if line.is_empty() {
-            commit_package(pkg_name.take(), pkg_version.take(), is_installed, &provides_raw);
+            commit_package(
+                pkg_name.take(),
+                pkg_version.take(),
+                is_installed,
+                &provides_raw,
+            );
             is_installed = false;
             provides_raw.clear();
             continue;
@@ -649,7 +653,10 @@ mod tests {
 
         assert!(host.provides_feature("gsettings-backend").is_some());
         assert!(host.provides_feature("dconf-service").is_some());
-        assert!(host.provides_package("dconf", &VersionConstraint::Any, "alpm").is_some());
+        assert!(
+            host.provides_package("dconf", &VersionConstraint::Any, "alpm")
+                .is_some()
+        );
     }
 
     #[test]
@@ -666,6 +673,9 @@ mod tests {
         assert!(host.provides_feature("default-dbus-session-bus").is_some());
         assert!(host.provides_feature("dbus-session-bus").is_some());
         assert!(host.provides_feature("should-not-be-included").is_none());
-        assert!(host.provides_package("dbus-user-session", &VersionConstraint::Any, "debian").is_some());
+        assert!(
+            host.provides_package("dbus-user-session", &VersionConstraint::Any, "debian")
+                .is_some()
+        );
     }
 }
