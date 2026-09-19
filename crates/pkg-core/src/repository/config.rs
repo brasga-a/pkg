@@ -3,132 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-pub const FALLBACK_REGISTRY_JSON: &str = r#"{
-  "schema_version": "1.0",
-  "updated_at": "2026-09-18T22:00:00Z",
-  "repositories": [
-    {
-      "id": "arch-core",
-      "name": "Arch Linux Core",
-      "distro": "arch",
-      "format": "alpm",
-      "url": "https://geo.mirror.pkgbuild.com",
-      "distribution": "core",
-      "components": [],
-      "priority": 100,
-      "description": "Core packages for Arch Linux",
-      "default_for": ["arch"]
-    },
-    {
-      "id": "arch-extra",
-      "name": "Arch Linux Extra",
-      "distro": "arch",
-      "format": "alpm",
-      "url": "https://geo.mirror.pkgbuild.com",
-      "distribution": "extra",
-      "components": [],
-      "priority": 90,
-      "description": "Extra packages for Arch Linux",
-      "default_for": ["arch"]
-    },
-    {
-      "id": "arch-multilib",
-      "name": "Arch Linux Multilib",
-      "distro": "arch",
-      "format": "alpm",
-      "url": "https://geo.mirror.pkgbuild.com",
-      "distribution": "multilib",
-      "components": [],
-      "priority": 80,
-      "description": "32-bit applications and libraries on 64-bit Arch Linux",
-      "default_for": []
-    },
-    {
-      "id": "ubuntu-noble",
-      "name": "Ubuntu 24.04 LTS (Noble Numbat)",
-      "distro": "ubuntu",
-      "format": "deb",
-      "url": "http://archive.ubuntu.com/ubuntu",
-      "distribution": "noble",
-      "components": ["main", "universe", "restricted", "multiverse"],
-      "priority": 100,
-      "description": "Ubuntu 24.04 LTS official repository",
-      "default_for": ["ubuntu:24.04", "ubuntu:noble"]
-    },
-    {
-      "id": "ubuntu-resolute",
-      "name": "Ubuntu 26.04 LTS (Resolute Raccoon)",
-      "distro": "ubuntu",
-      "format": "deb",
-      "url": "http://archive.ubuntu.com/ubuntu",
-      "distribution": "resolute",
-      "components": ["main", "universe", "restricted", "multiverse"],
-      "priority": 90,
-      "description": "Ubuntu 26.04 LTS official repository",
-      "default_for": ["ubuntu:26.04", "ubuntu:resolute"]
-    },
-    {
-      "id": "ubuntu-jammy",
-      "name": "Ubuntu 22.04 LTS (Jammy Jellyfish)",
-      "distro": "ubuntu",
-      "format": "deb",
-      "url": "http://archive.ubuntu.com/ubuntu",
-      "distribution": "jammy",
-      "components": ["main", "universe", "restricted", "multiverse"],
-      "priority": 80,
-      "description": "Ubuntu 22.04 LTS official repository",
-      "default_for": ["ubuntu:22.04", "ubuntu:jammy"]
-    },
-    {
-      "id": "debian-bookworm",
-      "name": "Debian 12 (Bookworm)",
-      "distro": "debian",
-      "format": "deb",
-      "url": "http://deb.debian.org/debian",
-      "distribution": "bookworm",
-      "components": ["main", "contrib", "non-free"],
-      "priority": 100,
-      "description": "Debian 12 official repository",
-      "default_for": ["debian:12", "debian:bookworm"]
-    },
-    {
-      "id": "debian-trixie",
-      "name": "Debian 13 (Trixie)",
-      "distro": "debian",
-      "format": "deb",
-      "url": "http://deb.debian.org/debian",
-      "distribution": "trixie",
-      "components": ["main", "contrib", "non-free"],
-      "priority": 90,
-      "description": "Debian 13 official repository",
-      "default_for": ["debian:13", "debian:trixie"]
-    },
-    {
-      "id": "fedora-41",
-      "name": "Fedora 41",
-      "distro": "fedora",
-      "format": "rpm",
-      "url": "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/41/Everything/x86_64/os",
-      "distribution": "41",
-      "components": [],
-      "priority": 100,
-      "description": "Fedora 41 official repository",
-      "default_for": ["fedora:41"]
-    },
-    {
-      "id": "fedora-42",
-      "name": "Fedora 42 (Rawhide)",
-      "distro": "fedora",
-      "format": "rpm",
-      "url": "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/42/Everything/x86_64/os",
-      "distribution": "42",
-      "components": [],
-      "priority": 90,
-      "description": "Fedora 42 official repository",
-      "default_for": ["fedora:42", "fedora:rawhide"]
-    }
-  ]
-}"#;
+pub const FALLBACK_REGISTRY_JSON: &str = include_str!("../../../../repositories.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CuratedRepository {
@@ -264,11 +139,47 @@ impl CuratedRegistry {
                 .collect();
         }
 
+        if distro.contains("almalinux") {
+            return self
+                .repositories
+                .iter()
+                .filter(|r| r.id == "almalinux-9-baseos" || r.id == "almalinux-9-appstream")
+                .cloned()
+                .collect();
+        }
+
+        if distro.contains("rocky") {
+            return self
+                .repositories
+                .iter()
+                .filter(|r| r.id == "rocky-9-baseos" || r.id == "rocky-9-appstream")
+                .cloned()
+                .collect();
+        }
+
         if distro.contains("fedora") || distro.contains("rhel") || distro.contains("centos") {
             return self
                 .repositories
                 .iter()
                 .filter(|r| r.id == "fedora-41")
+                .cloned()
+                .collect();
+        }
+
+        if distro.contains("opensuse") || distro.contains("suse") {
+            return self
+                .repositories
+                .iter()
+                .filter(|r| r.id == "opensuse-tumbleweed")
+                .cloned()
+                .collect();
+        }
+
+        if distro.contains("alpine") {
+            return self
+                .repositories
+                .iter()
+                .filter(|r| r.id == "alpine-v3.20")
                 .cloned()
                 .collect();
         }
@@ -453,6 +364,35 @@ mod tests {
         let repos = registry.default_for_distro("fedora", None, Some("41"));
         let ids: Vec<&str> = repos.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["fedora-41"]);
+    }
+
+    #[test]
+    fn test_distro_matching_expanded() {
+        let registry = CuratedRegistry::fallback();
+
+        // openSUSE
+        let suse = registry.default_for_distro("opensuse", None, None);
+        assert_eq!(suse[0].id, "opensuse-tumbleweed");
+
+        // Alpine
+        let alpine = registry.default_for_distro("alpine", None, Some("3.20"));
+        assert_eq!(alpine[0].id, "alpine-v3.20");
+
+        // AlmaLinux
+        let alma = registry.default_for_distro("almalinux", None, Some("9"));
+        let alma_ids: Vec<&str> = alma.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            alma_ids,
+            vec!["almalinux-9-baseos", "almalinux-9-appstream"]
+        );
+
+        // Debian Sid
+        let deb_sid = registry.default_for_distro("debian", Some("sid"), None);
+        assert_eq!(deb_sid[0].id, "debian-sid");
+
+        // Ubuntu Focal
+        let focal = registry.default_for_distro("ubuntu", Some("focal"), Some("20.04"));
+        assert_eq!(focal[0].id, "ubuntu-focal");
     }
 
     #[test]
