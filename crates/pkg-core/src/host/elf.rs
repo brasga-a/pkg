@@ -117,10 +117,8 @@ pub fn inspect_elf_with_extra_paths(
         _ => 0,
     };
     if expected_machine != 0 && elf.header.e_machine != expected_machine {
-        return Err(Error::ArchitectureMismatch {
-            expected: Architecture::parse(std::env::consts::ARCH).to_string(),
-            found: format!("ELF machine {}", elf.header.e_machine),
-        });
+        // Not a host-runnable ELF binary (e.g. vendored multiarch prebuild in npm/python package)
+        return Ok(None);
     }
     let expected_class_bits = match std::env::consts::ARCH {
         "x86_64" | "aarch64" | "riscv64" => 64,
@@ -133,11 +131,7 @@ pub fn inspect_elf_with_extra_paths(
         }
     };
     if elf.is_64 != (expected_class_bits == 64) {
-        return Err(Error::IncompatibleHost(format!(
-            "ELF class {} is unsupported on this {}-bit host",
-            if elf.is_64 { 64 } else { 32 },
-            expected_class_bits
-        )));
+        return Ok(None);
     }
     if let Some(interpreter) = elf.interpreter {
         let interpreter_path = Path::new(interpreter);

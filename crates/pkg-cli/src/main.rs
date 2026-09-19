@@ -2041,23 +2041,55 @@ async fn install_declared_dependencies(
                 // The DFS stack remains deterministic and applies the
                 // resulting dependency closure serially afterwards.
                 let mut frontier = Vec::new();
+                let mut unconfirmed = Vec::new();
                 for dependency in plan.resolved_dependencies {
                     let identity = dependency_identity(&dependency);
                     if scheduled.contains(&identity) || visiting.contains(&identity) {
                         continue;
                     }
                     let candidate = resolved_remote_candidate(engine, &dependency)?;
-                    if !prompt_confirm(
-                        &format!(
-                            "Install dependency '{}' automatically? [Y/n]: ",
-                            candidate.name
-                        ),
-                        true,
-                        assume_yes,
-                    )? {
-                        anyhow::bail!("dependency '{}' was declined", candidate.name);
+                    unconfirmed.push((dependency, candidate));
+                }
+
+                if !unconfirmed.is_empty() {
+                    if unconfirmed.len() == 1 {
+                        let (_, candidate) = &unconfirmed[0];
+                        if !prompt_confirm(
+                            &format!(
+                                "Install dependency '{}' automatically? [Y/n]: ",
+                                candidate.name
+                            ),
+                            true,
+                            assume_yes,
+                        )? {
+                            anyhow::bail!("dependency '{}' was declined", candidate.name);
+                        }
+                    } else {
+                        if !json_mode {
+                            println!(
+                                "The following {} dependencies are required for '{}':",
+                                unconfirmed.len(),
+                                plan.package.name
+                            );
+                            for (_, candidate) in &unconfirmed {
+                                println!(
+                                    "  - {} ({}) [{}]",
+                                    candidate.name, candidate.version, candidate.format
+                                );
+                            }
+                        }
+                        if !prompt_confirm(
+                            &format!(
+                                "Install these {} dependencies automatically? [Y/n]: ",
+                                unconfirmed.len()
+                            ),
+                            true,
+                            assume_yes,
+                        )? {
+                            anyhow::bail!("required dependencies were declined by user");
+                        }
                     }
-                    frontier.push((dependency, candidate));
+                    frontier.extend(unconfirmed);
                 }
 
                 let artifacts = acquire_remote_artifacts(

@@ -78,9 +78,9 @@ pub struct ExtractionLimits {
 impl Default for ExtractionLimits {
     fn default() -> Self {
         Self {
-            max_entries: 50_000,
-            max_total_bytes: 1_073_741_824,     // 1 GiB
-            max_single_file_bytes: 268_435_456, // 256 MiB
+            max_entries: 100_000,
+            max_total_bytes: 8_589_934_592,       // 8 GiB
+            max_single_file_bytes: 2_147_483_648, // 2 GiB
         }
     }
 }

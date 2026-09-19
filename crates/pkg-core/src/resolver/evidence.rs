@@ -19,6 +19,8 @@ pub const STANDARD_LIB_SEARCH_DIRS: &[&str] = &[
     "/usr/lib64",
     "/lib/x86_64-linux-gnu",
     "/usr/lib/x86_64-linux-gnu",
+    "/lib/aarch64-linux-gnu",
+    "/usr/lib/aarch64-linux-gnu",
     "/lib",
     "/usr/lib",
 ];
@@ -206,6 +208,284 @@ fn compare_numeric_version(left: &str, right: &str) -> std::cmp::Ordering {
                 ordering => return ordering,
             },
         }
+    }
+}
+
+/// Maps well-known distribution package names to candidate shared library SONAMEs.
+pub fn canonical_sonames_for_package(pkg_name: &str) -> Vec<String> {
+    let mut sonames = Vec::new();
+    match pkg_name {
+        "libc6" | "libc6-amd64" | "libc" | "glibc" => {
+            sonames.push("libc.so.6".to_string());
+        }
+        "libstdc++6" => {
+            sonames.push("libstdc++.so.6".to_string());
+        }
+        "libgcc-s1" | "libgcc1" => {
+            sonames.push("libgcc_s.so.1".to_string());
+        }
+        "zlib1g" => {
+            sonames.push("libz.so.1".to_string());
+        }
+        "libx11-6" => {
+            sonames.push("libX11.so.6".to_string());
+        }
+        "libx11-xcb1" => {
+            sonames.push("libX11-xcb.so.1".to_string());
+        }
+        "libgl1" => {
+            sonames.push("libGL.so.1".to_string());
+        }
+        "libegl1" => {
+            sonames.push("libEGL.so.1".to_string());
+        }
+        "libgles2" => {
+            sonames.push("libGLESv2.so.2".to_string());
+        }
+        "libgbm1" => {
+            sonames.push("libgbm.so.1".to_string());
+        }
+        "libdrm2" => {
+            sonames.push("libdrm.so.2".to_string());
+        }
+        "libasound2" => {
+            sonames.push("libasound.so.2".to_string());
+        }
+        "libatk-bridge2.0-0" => {
+            sonames.push("libatk-bridge-2.0.so.0".to_string());
+        }
+        "libatspi2.0-0" | "libatspi0" => {
+            sonames.push("libatspi.so.0".to_string());
+        }
+        "libatk1.0-0" => {
+            sonames.push("libatk-1.0.so.0".to_string());
+        }
+        "libcairo2" => {
+            sonames.push("libcairo.so.2".to_string());
+        }
+        "libcups2" => {
+            sonames.push("libcups.so.2".to_string());
+        }
+        "libdbus-1-3" => {
+            sonames.push("libdbus-1.so.3".to_string());
+        }
+        "libexpat1" => {
+            sonames.push("libexpat.so.1".to_string());
+        }
+        "libgdk-pixbuf-2.0-0" | "libgdk-pixbuf2.0-0" => {
+            sonames.push("libgdk_pixbuf-2.0.so.0".to_string());
+            sonames.push("libgdk-pixbuf-2.0.so.0".to_string());
+        }
+        "libglib2.0-0" => {
+            sonames.push("libglib-2.0.so.0".to_string());
+        }
+        "libgtk-3-0" => {
+            sonames.push("libgtk-3.so.0".to_string());
+        }
+        "libgtk-4-1" => {
+            sonames.push("libgtk-4.so.1".to_string());
+        }
+        "libnotify4" => {
+            sonames.push("libnotify.so.4".to_string());
+        }
+        "libnspr4" => {
+            sonames.push("libnspr4.so".to_string());
+        }
+        "libnss3" => {
+            sonames.push("libnss3.so".to_string());
+        }
+        "libpango-1.0-0" => {
+            sonames.push("libpango-1.0.so.0".to_string());
+        }
+        "libpangocairo-1.0-0" => {
+            sonames.push("libpangocairo-1.0.so.0".to_string());
+        }
+        "libpangoft2-1.0-0" => {
+            sonames.push("libpangoft2-1.0.so.0".to_string());
+        }
+        "libudev1" => {
+            sonames.push("libudev.so.1".to_string());
+        }
+        "libusb-1.0-0" => {
+            sonames.push("libusb-1.0.so.0".to_string());
+        }
+        "libxcb-dri3-0" => {
+            sonames.push("libxcb-dri3.so.0".to_string());
+        }
+        "libxkbcommon0" => {
+            sonames.push("libxkbcommon.so.0".to_string());
+        }
+        "libxkbfile1" => {
+            sonames.push("libxkbfile.so.1".to_string());
+        }
+        "libsecret-1-0" => {
+            sonames.push("libsecret-1.so.0".to_string());
+        }
+        "libssl3" => {
+            sonames.push("libssl.so.3".to_string());
+        }
+        "libssl1.1" => {
+            sonames.push("libssl.so.1.1".to_string());
+        }
+        "libcurl4" => {
+            sonames.push("libcurl.so.4".to_string());
+        }
+        "libsqlite3-0" => {
+            sonames.push("libsqlite3.so.0".to_string());
+        }
+        "libbz2-1.0" => {
+            sonames.push("libbz2.so.1.0".to_string());
+        }
+        "libxml2" => {
+            sonames.push("libxml2.so.2".to_string());
+        }
+        "liblzma5" => {
+            sonames.push("liblzma.so.5".to_string());
+        }
+        "libzstd1" => {
+            sonames.push("libzstd.so.1".to_string());
+        }
+        "libfontconfig1" => {
+            sonames.push("libfontconfig.so.1".to_string());
+        }
+        "libfreetype6" => {
+            sonames.push("libfreetype.so.6".to_string());
+        }
+        "libvulkan1" => {
+            sonames.push("libvulkan.so.1".to_string());
+        }
+        "libepoxy0" => {
+            sonames.push("libepoxy.so.0".to_string());
+        }
+        "libwayland-client0" => {
+            sonames.push("libwayland-client.so.0".to_string());
+        }
+        "libwayland-cursor0" => {
+            sonames.push("libwayland-cursor.so.0".to_string());
+        }
+        "libwayland-egl1" => {
+            sonames.push("libwayland-egl.so.1".to_string());
+        }
+        "libwayland-server0" => {
+            sonames.push("libwayland-server.so.0".to_string());
+        }
+        "libpulse0" => {
+            sonames.push("libpulse.so.0".to_string());
+        }
+        "libsystemd0" => {
+            sonames.push("libsystemd.so.0".to_string());
+        }
+        "libffi8" => {
+            sonames.push("libffi.so.8".to_string());
+        }
+        "libffi7" => {
+            sonames.push("libffi.so.7".to_string());
+        }
+        "libpng16-16" => {
+            sonames.push("libpng16.so.16".to_string());
+        }
+        "libjpeg62-turbo" | "libjpeg8" => {
+            sonames.push("libjpeg.so.62".to_string());
+            sonames.push("libjpeg.so.8".to_string());
+        }
+        _ => {}
+    }
+
+    if !sonames.is_empty() {
+        return sonames;
+    }
+
+    // Heuristic SONAME generation for Debian/RPM library package conventions:
+    if pkg_name.starts_with("lib") {
+        // e.g. "libgtk-3-0" -> "libgtk-3.so.0"
+        if let Some((stem, ver)) = pkg_name.rsplit_once('-') {
+            if !ver.is_empty() && ver.chars().all(|c| c.is_ascii_digit()) {
+                let candidate = format!("{stem}.so.{ver}");
+                if !sonames.contains(&candidate) {
+                    sonames.push(candidate);
+                }
+            }
+        }
+        // e.g. "libdrm2" -> "libdrm.so.2", "libasound2" -> "libasound.so.2"
+        let digits_start = pkg_name.find(|c: char| c.is_ascii_digit());
+        if let Some(pos) = digits_start {
+            if pos > 3 && pkg_name[pos..].chars().all(|c| c.is_ascii_digit()) {
+                let stem = &pkg_name[..pos];
+                let ver = &pkg_name[pos..];
+                let candidate = format!("{stem}.so.{ver}");
+                if !sonames.contains(&candidate) {
+                    sonames.push(candidate);
+                }
+            }
+        }
+        // Also candidate as direct .so: e.g. "libnss3.so"
+        let bare = format!("{pkg_name}.so");
+        if !sonames.contains(&bare) {
+            sonames.push(bare);
+        }
+    }
+
+    sonames
+}
+
+/// Maps utility/tool package names to host executable commands or virtual features.
+pub fn canonical_commands_for_package(pkg_name: &str) -> Option<&'static [&'static str]> {
+    match pkg_name {
+        "xdg-utils" => Some(&["xdg-open"]),
+        "xz-utils" => Some(&["xz"]),
+        "gtk-update-icon-cache" => Some(&["gtk-update-icon-cache"]),
+        "shared-mime-info" => Some(&["update-mime-database"]),
+        "desktop-file-utils" => Some(&["update-desktop-database"]),
+        "ca-certificates" => Some(&["update-ca-certificates"]),
+        "fontconfig" => Some(&["fc-cache"]),
+        _ => None,
+    }
+}
+
+/// Maps canonical package names to known equivalent package names in other Linux distributions.
+pub fn canonical_package_equivalents(pkg_name: &str) -> &'static [&'static str] {
+    match pkg_name {
+        "libc6" | "libc6-amd64" | "libc" => &["glibc"],
+        "glibc" => &["libc6", "libc"],
+        "libstdc++6" => &["gcc-libs", "libstdc++"],
+        "libgcc-s1" | "libgcc1" => &["gcc-libs", "libgcc"],
+        "zlib1g" => &["zlib"],
+        "zlib" => &["zlib1g"],
+        "xz-utils" => &["xz"],
+        "xz" => &["xz-utils"],
+        "libgtk-3-0" => &["gtk3"],
+        "gtk3" => &["libgtk-3-0"],
+        "libgtk-4-1" => &["gtk4"],
+        "gtk4" => &["libgtk-4-1"],
+        "libglib2.0-0" => &["glib2"],
+        "glib2" => &["libglib2.0-0"],
+        "libasound2" => &["alsa-lib"],
+        "alsa-lib" => &["libasound2"],
+        "libcups2" => &["libcups", "cups-libs"],
+        "libdbus-1-3" => &["dbus", "dbus-libs"],
+        "libexpat1" => &["expat"],
+        "expat" => &["libexpat1"],
+        "libgdk-pixbuf-2.0-0" | "libgdk-pixbuf2.0-0" => &["gdk-pixbuf2"],
+        "gdk-pixbuf2" => &["libgdk-pixbuf-2.0-0"],
+        "libnotify4" => &["libnotify"],
+        "libnotify" => &["libnotify4"],
+        "libnss3" => &["nss"],
+        "nss" => &["libnss3"],
+        "libnspr4" => &["nspr"],
+        "nspr" => &["libnspr4"],
+        "libpango-1.0-0" => &["pango"],
+        "pango" => &["libpango-1.0-0"],
+        "libudev1" => &["systemd-libs", "systemd"],
+        "libusb-1.0-0" => &["libusb", "libusb1"],
+        "libx11-6" => &["libx11", "libX11"],
+        "libxkbcommon0" => &["libxkbcommon"],
+        "libdrm2" => &["libdrm"],
+        "libdrm" => &["libdrm2"],
+        "libgbm1" => &["mesa", "mesa-libgbm"],
+        "libgl1" => &["libglvnd", "libglvnd-glx", "mesa"],
+        "libatspi2.0-0" | "libatk-bridge2.0-0" | "libatk1.0-0" => &["at-spi2-core"],
+        "libxcb-dri3-0" => &["libxcb"],
+        _ => &[],
     }
 }
 
@@ -677,5 +957,44 @@ mod tests {
             host.provides_package("dbus-user-session", &VersionConstraint::Any, "debian")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn test_canonical_mappings() {
+        assert_eq!(
+            canonical_sonames_for_package("libc6"),
+            vec!["libc.so.6".to_string()]
+        );
+        assert_eq!(
+            canonical_sonames_for_package("libgtk-3-0"),
+            vec!["libgtk-3.so.0".to_string()]
+        );
+        assert_eq!(
+            canonical_sonames_for_package("libasound2"),
+            vec!["libasound.so.2".to_string()]
+        );
+        assert_eq!(
+            canonical_sonames_for_package("libx11-6"),
+            vec!["libX11.so.6".to_string()]
+        );
+        // Test heuristic fallback for an unmapped library package:
+        assert!(
+            canonical_sonames_for_package("libcustom-4-2")
+                .contains(&"libcustom-4.so.2".to_string())
+        );
+
+        assert_eq!(
+            canonical_commands_for_package("xdg-utils"),
+            Some(&["xdg-open"][..])
+        );
+        assert_eq!(
+            canonical_commands_for_package("xz-utils"),
+            Some(&["xz"][..])
+        );
+        assert_eq!(canonical_commands_for_package("unknown-tool"), None);
+
+        assert_eq!(canonical_package_equivalents("libc6"), &["glibc"]);
+        assert_eq!(canonical_package_equivalents("libgtk-3-0"), &["gtk3"]);
+        assert_eq!(canonical_package_equivalents("libasound2"), &["alsa-lib"]);
     }
 }
