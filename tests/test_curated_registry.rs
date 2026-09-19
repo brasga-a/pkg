@@ -99,10 +99,22 @@ fn test_curated_registry_fallback_structure() {
         "ubuntu-noble",
         "ubuntu-resolute",
         "ubuntu-jammy",
+        "ubuntu-focal",
         "debian-bookworm",
         "debian-trixie",
+        "debian-sid",
+        "debian-bullseye",
         "fedora-41",
         "fedora-42",
+        "fedora-40",
+        "opensuse-tumbleweed",
+        "opensuse-leap-15-6",
+        "alpine-v3.20",
+        "alpine-edge",
+        "almalinux-9-baseos",
+        "almalinux-9-appstream",
+        "rocky-9-baseos",
+        "rocky-9-appstream",
     ];
 
     for id in &expected_ids {
@@ -146,6 +158,24 @@ fn test_curated_registry_distro_detection_heuristics() {
     let fedora_repos = registry.default_for_distro("fedora", None, Some("41"));
     let fed_ids: Vec<&str> = fedora_repos.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(fed_ids, vec!["fedora-41"]);
+
+    // openSUSE Tumbleweed
+    let suse_repos = registry.default_for_distro("opensuse-tumbleweed", None, None);
+    let suse_ids: Vec<&str> = suse_repos.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(suse_ids, vec!["opensuse-tumbleweed"]);
+
+    // Alpine v3.20
+    let alpine_repos = registry.default_for_distro("alpine", None, Some("3.20"));
+    let alp_ids: Vec<&str> = alpine_repos.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(alp_ids, vec!["alpine-v3.20"]);
+
+    // AlmaLinux 9
+    let alma_repos = registry.default_for_distro("almalinux", None, Some("9"));
+    let alma_ids: Vec<&str> = alma_repos.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        alma_ids,
+        vec!["almalinux-9-baseos", "almalinux-9-appstream"]
+    );
 
     // Unknown distro fallback
     let unknown_repos = registry.default_for_distro("unknown_distro", None, None);

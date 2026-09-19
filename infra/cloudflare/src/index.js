@@ -32,7 +32,7 @@ export default {
 
     // 3. Official Repositories Catalog: /repositories, /repositories.json
     if (pathname === "/repositories" || pathname === "/repositories.json") {
-      return handleRepositories();
+      return handleRepositories(repo, branch);
     }
 
     // 4. Releases: latest.txt
@@ -366,10 +366,35 @@ function handleLandingPage(repo) {
 }
 
 /**
- * Serves curated repository catalog in JSON format
+ * Serves curated repository catalog in JSON format with CDN caching and live GitHub sync
  */
-function handleRepositories() {
-  const data = {
+async function handleRepositories(repo, branch) {
+  const upstreamUrl = `https://raw.githubusercontent.com/${repo}/${branch}/repositories.json`;
+
+  try {
+    const upstreamRes = await fetch(upstreamUrl, {
+      cf: {
+        cacheEverything: true,
+        cacheTtl: 300 // 5 minutes cache on edge
+      }
+    });
+
+    if (upstreamRes.ok) {
+      const text = await upstreamRes.text();
+      return new Response(text, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "public, max-age=300, s-maxage=300",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    }
+  } catch (_err) {
+    // Fall back to static embedded catalog below
+  }
+
+  const fallbackData = {
     schema_version: "1.0",
     updated_at: "2026-09-18T22:00:00Z",
     repositories: [
@@ -446,13 +471,25 @@ function handleRepositories() {
         default_for: ["ubuntu:22.04", "ubuntu:jammy"]
       },
       {
+        id: "ubuntu-focal",
+        name: "Ubuntu 20.04 LTS (Focal Fossa)",
+        distro: "ubuntu",
+        format: "deb",
+        url: "http://archive.ubuntu.com/ubuntu",
+        distribution: "focal",
+        components: ["main", "universe", "restricted", "multiverse"],
+        priority: 70,
+        description: "Ubuntu 20.04 LTS official repository",
+        default_for: ["ubuntu:20.04", "ubuntu:focal"]
+      },
+      {
         id: "debian-bookworm",
         name: "Debian 12 (Bookworm)",
         distro: "debian",
         format: "deb",
         url: "http://deb.debian.org/debian",
         distribution: "bookworm",
-        components: ["main", "contrib", "non-free"],
+        components: ["main", "contrib", "non-free", "non-free-firmware"],
         priority: 100,
         description: "Debian 12 official repository",
         default_for: ["debian:12", "debian:bookworm"]
@@ -464,10 +501,34 @@ function handleRepositories() {
         format: "deb",
         url: "http://deb.debian.org/debian",
         distribution: "trixie",
-        components: ["main", "contrib", "non-free"],
+        components: ["main", "contrib", "non-free", "non-free-firmware"],
         priority: 90,
         description: "Debian 13 official repository",
         default_for: ["debian:13", "debian:trixie"]
+      },
+      {
+        id: "debian-sid",
+        name: "Debian Unstable (Sid)",
+        distro: "debian",
+        format: "deb",
+        url: "http://deb.debian.org/debian",
+        distribution: "sid",
+        components: ["main", "contrib", "non-free", "non-free-firmware"],
+        priority: 85,
+        description: "Debian Unstable (Sid) rolling repository",
+        default_for: ["debian:sid", "debian:unstable"]
+      },
+      {
+        id: "debian-bullseye",
+        name: "Debian 11 (Bullseye)",
+        distro: "debian",
+        format: "deb",
+        url: "http://deb.debian.org/debian",
+        distribution: "bullseye",
+        components: ["main", "contrib", "non-free"],
+        priority: 70,
+        description: "Debian 11 official repository",
+        default_for: ["debian:11", "debian:bullseye"]
       },
       {
         id: "fedora-41",
@@ -492,14 +553,122 @@ function handleRepositories() {
         priority: 90,
         description: "Fedora 42 official repository",
         default_for: ["fedora:42", "fedora:rawhide"]
+      },
+      {
+        id: "fedora-40",
+        name: "Fedora 40",
+        distro: "fedora",
+        format: "rpm",
+        url: "https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Everything/x86_64/os",
+        distribution: "40",
+        components: [],
+        priority: 80,
+        description: "Fedora 40 official repository",
+        default_for: ["fedora:40"]
+      },
+      {
+        id: "opensuse-tumbleweed",
+        name: "openSUSE Tumbleweed OSS",
+        distro: "opensuse",
+        format: "rpm",
+        url: "https://download.opensuse.org/tumbleweed/repo/oss",
+        distribution: "tumbleweed",
+        components: [],
+        priority: 100,
+        description: "openSUSE Tumbleweed rolling release official repository",
+        default_for: ["opensuse:tumbleweed", "opensuse-tumbleweed"]
+      },
+      {
+        id: "opensuse-leap-15-6",
+        name: "openSUSE Leap 15.6 OSS",
+        distro: "opensuse",
+        format: "rpm",
+        url: "https://download.opensuse.org/distribution/leap/15.6/repo/oss",
+        distribution: "15.6",
+        components: [],
+        priority: 90,
+        description: "openSUSE Leap 15.6 official repository",
+        default_for: ["opensuse:15.6", "opensuse-leap:15.6", "opensuse-leap"]
+      },
+      {
+        id: "alpine-v3.20",
+        name: "Alpine Linux v3.20",
+        distro: "alpine",
+        format: "apk",
+        url: "https://dl-cdn.alpinelinux.org/alpine/v3.20",
+        distribution: "v3.20",
+        components: ["main", "community"],
+        priority: 100,
+        description: "Alpine Linux v3.20 official repository",
+        default_for: ["alpine:3.20", "alpine:v3.20", "alpine"]
+      },
+      {
+        id: "alpine-edge",
+        name: "Alpine Linux Edge",
+        distro: "alpine",
+        format: "apk",
+        url: "https://dl-cdn.alpinelinux.org/alpine/edge",
+        distribution: "edge",
+        components: ["main", "community", "testing"],
+        priority: 90,
+        description: "Alpine Linux Edge rolling repository",
+        default_for: ["alpine:edge"]
+      },
+      {
+        id: "almalinux-9-baseos",
+        name: "AlmaLinux 9 BaseOS",
+        distro: "almalinux",
+        format: "rpm",
+        url: "https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os",
+        distribution: "9",
+        components: [],
+        priority: 100,
+        description: "AlmaLinux 9 BaseOS official repository",
+        default_for: ["almalinux:9", "almalinux"]
+      },
+      {
+        id: "almalinux-9-appstream",
+        name: "AlmaLinux 9 AppStream",
+        distro: "almalinux",
+        format: "rpm",
+        url: "https://repo.almalinux.org/almalinux/9/AppStream/x86_64/os",
+        distribution: "9",
+        components: [],
+        priority: 90,
+        description: "AlmaLinux 9 AppStream official repository",
+        default_for: ["almalinux:9", "almalinux"]
+      },
+      {
+        id: "rocky-9-baseos",
+        name: "Rocky Linux 9 BaseOS",
+        distro: "rocky",
+        format: "rpm",
+        url: "https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os",
+        distribution: "9",
+        components: [],
+        priority: 100,
+        description: "Rocky Linux 9 BaseOS official repository",
+        default_for: ["rocky:9", "rocky"]
+      },
+      {
+        id: "rocky-9-appstream",
+        name: "Rocky Linux 9 AppStream",
+        distro: "rocky",
+        format: "rpm",
+        url: "https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os",
+        distribution: "9",
+        components: [],
+        priority: 90,
+        description: "Rocky Linux 9 AppStream official repository",
+        default_for: ["rocky:9", "rocky"]
       }
     ]
   };
 
-  return new Response(JSON.stringify(data, null, 2), {
+  return new Response(JSON.stringify(fallbackData, null, 2), {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, max-age=300",
       "Access-Control-Allow-Origin": "*"
     }
   });
