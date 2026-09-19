@@ -143,6 +143,14 @@ fn test_extraction_limits_enforced() {
 }
 
 #[test]
+fn test_default_extraction_limits_allow_large_files() {
+    let limits = ExtractionLimits::default();
+    assert_eq!(limits.max_entries, 100_000);
+    assert_eq!(limits.max_total_bytes, 8_589_934_592); // 8 GiB
+    assert_eq!(limits.max_single_file_bytes, 2_147_483_648); // 2 GiB
+}
+
+#[test]
 fn test_maintainer_scripts_inventoried_never_executed() {
     let temp = tempdir().unwrap();
     let deb = temp.path().join("scripted.deb");

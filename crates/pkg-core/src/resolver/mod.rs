@@ -22,7 +22,10 @@ use crate::domain::constraint::{CapabilityConstraint, Constraint, VersionConstra
 use crate::domain::package::{NormalizedPackage, PackageName};
 use crate::domain::version::VersionEcosystem;
 use crate::host::elf::inspect_elf;
-use crate::resolver::evidence::{CapabilityEvidence, HostEvidence};
+use crate::resolver::evidence::{
+    CapabilityEvidence, HostEvidence, canonical_commands_for_package,
+    canonical_package_equivalents, canonical_sonames_for_package,
+};
 use crate::resolver::explanation::{ExplanationChain, RejectionReason};
 
 /// Represents an unsatisfied resolution error containing an explanation chain (INV-020).
@@ -511,6 +514,24 @@ impl Resolver {
             }
         }
 
+        // Check host evidence for command/tool packages (e.g. xdg-utils, xz-utils)
+        if let Some(commands) = canonical_commands_for_package(name.as_str()) {
+            if commands.iter().any(|cmd| {
+                self.host
+                    .provides_capability(&format!("bin:{cmd}"))
+                    .is_some()
+            }) {
+                host_satisfied.push(CapabilityEvidence {
+                    capability: Capability::Feature(name.to_string()),
+                    version: None,
+                    provider_origin: format!("host:tool:{name}"),
+                    symbols: Vec::new(),
+                });
+                resolved_names.insert(name.clone());
+                return Ok(());
+            }
+        }
+
         // Check host native packages matching ecosystem
         if let Some(host_pkg) =
             self.host
@@ -524,6 +545,77 @@ impl Resolver {
             });
             resolved_names.insert(name.clone());
             return Ok(());
+        }
+
+        // Check host evidence for shared library SONAMEs (ADR-016, INV-009)
+        let candidate_sonames = canonical_sonames_for_package(name.as_str());
+        for soname in &candidate_sonames {
+            if self.host.has_soname(soname) {
+                // If version-constrained, verify against host capability or equivalent host packages
+                let version_ok = match version_constraint {
+                    VersionConstraint::Any => true,
+                    VersionConstraint::Relational(_, _) => {
+                        let host_cap = self.host.provides_capability(&format!("lib:{soname}"));
+                        if let Some(host_ver) = host_cap.and_then(|c| c.version.as_ref()) {
+                            version_constraint.matches(host_ver.as_str(), VersionEcosystem::Debian)
+                        } else {
+                            // Check equivalent host packages for version evidence
+                            let equiv_names = canonical_package_equivalents(name.as_str());
+                            equiv_names.iter().any(|equiv| {
+                                self.host.host_packages.get(*equiv).is_some_and(|pkg| {
+                                    let eco = match pkg.ecosystem.as_str() {
+                                        "debian" | "ubuntu" => VersionEcosystem::Debian,
+                                        "rpm" | "fedora" | "rhel" | "suse" | "centos" => {
+                                            VersionEcosystem::Rpm
+                                        }
+                                        "alpm" | "arch" => VersionEcosystem::Alpm,
+                                        _ => VersionEcosystem::Debian,
+                                    };
+                                    version_constraint.matches(pkg.version.as_str(), eco)
+                                })
+                            })
+                        }
+                    }
+                };
+
+                if version_ok {
+                    let inferred_ver = self
+                        .host
+                        .provides_capability(&format!("lib:{soname}"))
+                        .and_then(|c| c.version.clone());
+                    host_satisfied.push(CapabilityEvidence {
+                        capability: Capability::SharedLibrary(soname.clone()),
+                        version: inferred_ver,
+                        provider_origin: format!("host:lib:{name}"),
+                        symbols: Vec::new(),
+                    });
+                    resolved_names.insert(name.clone());
+                    return Ok(());
+                }
+            }
+        }
+
+        // Check host native packages matching equivalent names across ecosystems (ADR-016, INV-007)
+        let equiv_names = canonical_package_equivalents(name.as_str());
+        for equiv in equiv_names {
+            if let Some(host_pkg) = self.host.host_packages.get(*equiv) {
+                let eco = match host_pkg.ecosystem.as_str() {
+                    "debian" | "ubuntu" => VersionEcosystem::Debian,
+                    "rpm" | "fedora" | "rhel" | "suse" | "centos" => VersionEcosystem::Rpm,
+                    "alpm" | "arch" => VersionEcosystem::Alpm,
+                    _ => VersionEcosystem::Debian,
+                };
+                if version_constraint.matches(host_pkg.version.as_str(), eco) {
+                    host_satisfied.push(CapabilityEvidence {
+                        capability: Capability::Feature(name.to_string()),
+                        version: Some(host_pkg.version.clone()),
+                        provider_origin: format!("host:pkg:{}", host_pkg.name),
+                        symbols: Vec::new(),
+                    });
+                    resolved_names.insert(name.clone());
+                    return Ok(());
+                }
+            }
         }
 
         // Check installed packages (direct package match)
@@ -1094,6 +1186,125 @@ mod tests {
         let plan = resolver.resolve(&pkg).unwrap();
         assert_eq!(plan.host_satisfied_capabilities.len(), 1);
         assert_eq!(plan.packages_to_install.len(), 0);
+    }
+
+    #[test]
+    fn test_resolve_debian_package_satisfied_via_host_soname() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .add_library("libc.so.6", Some("2.38"), &["GLIBC_2.38"])
+            .build();
+
+        let resolver = Resolver::new(host);
+
+        let pkg = make_pkg(
+            "deb-tool",
+            "1.0.0",
+            PackageFormat::Deb,
+            vec![Constraint::Package {
+                name: PackageName::new("libc6").unwrap(),
+                version: VersionConstraint::Relational(
+                    VersionOp::GreaterEqual,
+                    PackageVersion::new("2.34"),
+                ),
+                ecosystem: "debian".to_string(),
+                original_expression: "libc6 (>= 2.34)".to_string(),
+            }],
+            vec![],
+        );
+
+        let plan = resolver.resolve(&pkg).unwrap();
+        assert_eq!(plan.host_satisfied_capabilities.len(), 1);
+        assert_eq!(plan.packages_to_install.len(), 0);
+        assert_eq!(
+            plan.host_satisfied_capabilities[0].capability,
+            Capability::SharedLibrary("libc.so.6".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_debian_package_satisfied_via_host_equivalent_package() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .add_host_package("alsa-lib", "1.2.11-1", "alpm", vec![])
+            .build();
+
+        let resolver = Resolver::new(host);
+
+        let pkg = make_pkg(
+            "deb-media-player",
+            "1.0.0",
+            PackageFormat::Deb,
+            vec![Constraint::Package {
+                name: PackageName::new("libasound2").unwrap(),
+                version: VersionConstraint::Relational(
+                    VersionOp::GreaterEqual,
+                    PackageVersion::new("1.0.17"),
+                ),
+                ecosystem: "debian".to_string(),
+                original_expression: "libasound2 (>= 1.0.17)".to_string(),
+            }],
+            vec![],
+        );
+
+        let plan = resolver.resolve(&pkg).unwrap();
+        assert_eq!(plan.packages_to_install.len(), 0);
+        assert_eq!(plan.host_satisfied_capabilities.len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_debian_package_satisfied_via_host_command() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .add_executable("xdg-open")
+            .build();
+
+        let resolver = Resolver::new(host);
+
+        let pkg = make_pkg(
+            "deb-desktop-app",
+            "1.0.0",
+            PackageFormat::Deb,
+            vec![Constraint::Package {
+                name: PackageName::new("xdg-utils").unwrap(),
+                version: VersionConstraint::Any,
+                ecosystem: "debian".to_string(),
+                original_expression: "xdg-utils".to_string(),
+            }],
+            vec![],
+        );
+
+        let plan = resolver.resolve(&pkg).unwrap();
+        assert_eq!(plan.packages_to_install.len(), 0);
+        assert_eq!(plan.host_satisfied_capabilities.len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_debian_package_incompatible_version_rejected() {
+        let host = HostEvidence::builder()
+            .architecture(Architecture::X86_64)
+            .add_library("libc.so.6", Some("2.35"), &["GLIBC_2.35"])
+            .build();
+
+        let resolver = Resolver::new(host);
+
+        let pkg = make_pkg(
+            "deb-tool-future",
+            "1.0.0",
+            PackageFormat::Deb,
+            vec![Constraint::Package {
+                name: PackageName::new("libc6").unwrap(),
+                version: VersionConstraint::Relational(
+                    VersionOp::GreaterEqual,
+                    PackageVersion::new("2.99"),
+                ),
+                ecosystem: "debian".to_string(),
+                original_expression: "libc6 (>= 2.99)".to_string(),
+            }],
+            vec![],
+        );
+
+        assert!(resolver.resolve(&pkg).is_err());
     }
 
     #[test]
