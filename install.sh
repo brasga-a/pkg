@@ -118,6 +118,9 @@ ENVIRONMENT VARIABLES:
     PKG_BASE_URL              Release mirror base URL
     PKG_NO_MODIFY_PATH        Skip modifying ~/.bashrc, ~/.zshrc, etc.
     PKG_QUIET                 Silent mode (errors only)
+
+UNINSTALL:
+    curl -fsSL https://pkg.atlantic.sh/uninstall | sh
 EOF
                 exit 0
                 ;;

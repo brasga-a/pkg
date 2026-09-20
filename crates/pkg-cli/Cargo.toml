@@ -141,3 +141,7 @@ path = "../../tests/test_curated_registry.rs"
 name = "test_cli_no_deps"
 path = "../../tests/test_cli_no_deps.rs"
 
+[[test]]
+name = "test_uninstall_script"
+path = "../../tests/test_uninstall_script.rs"
+
