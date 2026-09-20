@@ -204,7 +204,7 @@ fn test_cli_repo_list_remote() {
 
     let mut cmd = Command::cargo_bin("pkg").unwrap();
     let assert = cmd
-        .args(["--data-dir", data_dir, "repo", "list", "--remote"])
+        .args(["--data-dir", data_dir, "repo", "remote"])
         .assert();
     assert
         .success()
@@ -220,7 +220,7 @@ fn test_cli_repo_list_remote_json() {
 
     let mut cmd = Command::cargo_bin("pkg").unwrap();
     let assert = cmd
-        .args(["--data-dir", data_dir, "--json", "repo", "list", "--remote"])
+        .args(["--data-dir", data_dir, "--json", "repo", "remote"])
         .assert();
     let output = assert.success().get_output().stdout.clone();
     let parsed: serde_json::Value = serde_json::from_slice(&output).expect("valid json output");
@@ -274,6 +274,19 @@ fn test_cli_repo_add_curated_id() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("not in the curated registry"));
+
+    // 5. Remove arch-multilib
+    let mut remove_cmd = Command::cargo_bin("pkg").unwrap();
+    remove_cmd
+        .args(["--data-dir", data_dir, "repo", "remove", "arch-multilib"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Successfully removed repository 'arch-multilib'",
+        ));
+
+    let config_after = RepositoriesConfig::load_from_file(&config_path).unwrap();
+    assert_eq!(config_after.repositories.len(), 0);
 }
 
 #[tokio::test]

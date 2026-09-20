@@ -256,6 +256,33 @@ async fn resolve_or_fetch_keyring(
         }
     }
 
+    // If ubuntu and not on host, fetch Ubuntu official archive keyring automatically
+    if url.to_lowercase().contains("ubuntu") {
+        let ubuntu_key = keyrings_dir.join("ubuntu-archive-keyring.gpg");
+        if ubuntu_key.exists() {
+            return Some(ubuntu_key);
+        }
+        let key_urls = [
+            format!(
+                "{}/project/ubuntu-archive-keyring.gpg",
+                url.trim_end_matches('/')
+            ),
+            "http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg".to_string(),
+        ];
+        for key_url in &key_urls {
+            if let Ok(res) = client.get(key_url).send().await {
+                if res.status().is_success() {
+                    if let Ok(bytes) = res.bytes().await {
+                        let _ = tokio::fs::create_dir_all(keyrings_dir).await;
+                        if tokio::fs::write(&ubuntu_key, &bytes).await.is_ok() {
+                            return Some(ubuntu_key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // If debian and not on host, fetch Debian official archive key automatically
     if url.contains("debian.org") {
         let debian_key = keyrings_dir.join(format!("debian-{distribution}.asc"));
@@ -264,10 +291,12 @@ async fn resolve_or_fetch_keyring(
         }
         let key_url = "https://ftp-master.debian.org/keys/archive-key-12.asc";
         if let Ok(res) = client.get(key_url).send().await {
-            if let Ok(bytes) = res.bytes().await {
-                let _ = tokio::fs::create_dir_all(keyrings_dir).await;
-                if tokio::fs::write(&debian_key, &bytes).await.is_ok() {
-                    return Some(debian_key);
+            if res.status().is_success() {
+                if let Ok(bytes) = res.bytes().await {
+                    let _ = tokio::fs::create_dir_all(keyrings_dir).await;
+                    if tokio::fs::write(&debian_key, &bytes).await.is_ok() {
+                        return Some(debian_key);
+                    }
                 }
             }
         }

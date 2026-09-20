@@ -18,6 +18,8 @@ use pkg_core::{
     InstallOptions, PackageInfo, RemoteResolution, StoreLayout,
 };
 
+mod self_management;
+
 static JSON_EMITTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser, Debug)]
@@ -76,12 +78,17 @@ enum Commands {
         #[arg(long = "no-deps", alias = "skip-deps")]
         no_deps: bool,
 
+        /// Skip creating desktop entries, icons, and MIME associations
+        #[arg(long = "no-integrate")]
+        no_integrate: bool,
+
         /// Interactively select from matching package candidates
         #[arg(short = 'i', long = "interactive")]
         interactive: bool,
     },
 
     /// Remove an installed package from the active profile
+    #[command(alias = "uninstall")]
     Remove {
         /// Package name to remove
         name: String,
@@ -109,6 +116,7 @@ enum Commands {
     },
 
     /// Expose an installed package's desktop, icon and MIME resources in the user's data dirs.
+    #[command(hide = true)]
     Integrate {
         /// Installed package name
         package: String,
@@ -118,6 +126,7 @@ enum Commands {
     },
 
     /// Remove only host integration links owned by an installed package.
+    #[command(hide = true)]
     Deintegrate {
         /// Installed package name
         package: String,
@@ -142,27 +151,16 @@ enum Commands {
     },
 
     /// Capture a legacy profile activation as an explicitly unverified generation.
+    #[command(hide = true)]
     Migrate,
 
     /// List locally installed packages in the profile
     List,
 
-    /// Synchronize local package catalog from configured remote repositories
-    Sync,
-
-    /// Resolve and apply newer versions from repository snapshots (alias of `pkg upgrade`)
+    /// Guidance for update operations (did you mean `pkg upgrade` or `pkg repo update`?)
     Update {
-        /// Upgrade only one installed package
-        name: Option<String>,
-        /// Show the update plan without downloading or changing state
-        #[arg(long)]
-        dry_run: bool,
-        /// Automatically accept upgrade confirmations
-        #[arg(short = 'y', long = "yes")]
-        yes: bool,
-        /// Maximum concurrent artifact acquisitions (1-16)
-        #[arg(long, default_value_t = 4, value_parser = parse_jobs)]
-        jobs: usize,
+        /// Optional target package name
+        target: Option<String>,
     },
 
     /// Search for a package in the remote catalog
@@ -179,10 +177,10 @@ enum Commands {
         repo: Option<String>,
     },
 
-    /// Manage remote repositories
+    /// Manage remote repositories (list, add, remove, remote, update)
     Repo {
         #[command(subcommand)]
-        command: RepoCommands,
+        command: Option<RepoCommands>,
     },
 
     /// Show detailed metadata and state for a package or artifact
@@ -200,19 +198,45 @@ enum Commands {
         command: ProfileCommands,
     },
 
-    /// Resolve and optionally apply newer versions from repository snapshots
+    /// Upgrade installed packages in the active profile to newer versions
     Upgrade {
         /// Upgrade only one installed package
         name: Option<String>,
         /// Show the upgrade plan without downloading or changing state
         #[arg(long)]
         dry_run: bool,
-        /// Retained for a stable non-interactive command surface
+        /// Automatically accept upgrade confirmations
         #[arg(short = 'y', long = "yes")]
         yes: bool,
         /// Maximum concurrent artifact acquisitions (1-16)
         #[arg(long, default_value_t = 4, value_parser = parse_jobs)]
         jobs: usize,
+    },
+
+    /// Update the pkg executable itself to the latest official release
+    SelfUpdate {
+        /// Only check for updates without applying
+        #[arg(long)]
+        check: bool,
+        /// Automatically accept update confirmation
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
+
+    /// Uninstall pkg and optionally purge its data and configuration
+    SelfUninstall {
+        /// Remove all user data, package store, cache, and configuration
+        #[arg(short = 'p', long = "purge")]
+        purge: bool,
+        /// Automatically answer yes to all confirmation prompts
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+        /// Show what would be removed without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not modify shell rc files to remove PATH entries
+        #[arg(long = "no-modify-path")]
+        no_modify_path: bool,
     },
 
     /// Run the native JSON-RPC MCP server over standard input/output
@@ -231,33 +255,36 @@ enum ProfileCommands {
 
 #[derive(Subcommand, Debug)]
 enum RepoCommands {
-    /// Add a new remote repository
+    /// List configured repositories in the local environment
+    List,
+    /// List official repositories available in the remote curated catalog
+    Remote,
+    /// Synchronize repository metadata and package indexes from configured repositories
+    Update,
+    /// Add a repository by ID from the catalog, or by custom URL
     Add {
-        /// Unique identifier for the repository (e.g., ubuntu-noble, fedora-41, arch-extra)
+        /// Unique identifier from the catalog (e.g. ubuntu-resolute, arch-multilib) or custom ID
         id: String,
+        /// Repository base URL (optional if adding from the official catalog)
+        url: Option<String>,
         /// Repository format ecosystem (deb, rpm, alpm)
         #[arg(long)]
         format: Option<String>,
-        /// Repository base URL (e.g., http://archive.ubuntu.com/ubuntu)
-        url: Option<String>,
-        /// Distribution suite (e.g., noble, 41, extra)
+        /// Distribution suite (e.g. noble, resolute, 41, extra)
+        #[arg(long)]
         distribution: Option<String>,
-        /// Components to fetch (e.g., main universe)
+        /// Components to fetch (e.g. main universe)
         #[arg(trailing_var_arg = true)]
         components: Vec<String>,
         /// Repository priority (higher values preferred during resolution)
         #[arg(long)]
         priority: Option<u32>,
     },
-    /// List configured repositories
-    List {
-        /// List all official repositories available from the remote curated registry
-        #[arg(long, short)]
-        remote: bool,
+    /// Remove a configured repository
+    Remove {
+        /// Unique identifier of the repository to remove
+        id: String,
     },
-    /// Synchronize repository metadata from configured remote repositories
-    #[command(alias = "update")]
-    Sync,
 }
 
 fn init_tracing(verbose: bool) {
@@ -308,24 +335,52 @@ async fn run() -> Result<()> {
         }
     };
 
-    // Keep one implementation for both historical spellings.  `pkg update`
-    // updates installed packages; repository metadata is handled by
-    // `pkg repo sync` (with `pkg sync` and `pkg repo update` retained as
-    // compatibility spellings).
-    let command = match command {
-        Commands::Update {
-            name,
-            dry_run,
+    match &command {
+        Commands::Update { target } => {
+            if cli.json {
+                emit_json(&serde_json::json!({
+                    "status": "notice",
+                    "message": "In pkg, update operations are explicitly separated into 'pkg upgrade' and 'pkg repo update'.",
+                    "commands": {
+                        "pkg upgrade": "Update installed packages to newer versions",
+                        "pkg repo update": "Update repository catalog and metadata indexes"
+                    },
+                    "hint": if let Some(t) = target {
+                        format!("Did you mean `pkg upgrade {t}`?")
+                    } else {
+                        "Did you mean `pkg upgrade` (to update packages) or `pkg repo update` (to refresh repositories)?".to_string()
+                    }
+                }))?;
+            } else {
+                println!("Notice: In pkg, update operations are explicitly separated:");
+                println!("  - 'pkg upgrade'      Update installed packages to newer versions");
+                println!("  - 'pkg repo update'  Update repository catalog and metadata indexes\n");
+                if let Some(t) = target {
+                    println!("To update package '{t}', run:");
+                    println!("  pkg upgrade {t}");
+                } else {
+                    println!("Usage:");
+                    println!("  pkg upgrade          # Upgrade all installed applications");
+                    println!(
+                        "  pkg repo update      # Fetch newest package listings from repositories"
+                    );
+                }
+            }
+            return Ok(());
+        }
+        Commands::SelfUpdate { check, yes } => {
+            return self_management::run_self_update(*check, *yes).await;
+        }
+        Commands::SelfUninstall {
+            purge,
             yes,
-            jobs,
-        } => Commands::Upgrade {
-            name,
             dry_run,
-            yes,
-            jobs,
-        },
-        command => command,
-    };
+            no_modify_path,
+        } => {
+            return self_management::run_self_uninstall(*purge, *yes, *dry_run, *no_modify_path);
+        }
+        _ => {}
+    }
 
     let plan_only = matches!(
         &command,
@@ -353,6 +408,7 @@ async fn run() -> Result<()> {
             ignore_missing_libs,
             interactive,
             no_deps,
+            no_integrate,
         } => {
             let config_path = engine.layout().base_dir().join("repositories.toml");
             let config = if config_path.exists() {
@@ -952,6 +1008,28 @@ async fn run() -> Result<()> {
                             }
                         }
                         installed_count += 1;
+                        if !dry_run && !no_integrate {
+                            match engine.integrate(&cli.profile, plan.package.name.as_str(), false)
+                            {
+                                Ok(int_plan) => {
+                                    if !int_plan.actions.is_empty() && !json_mode {
+                                        println!(
+                                            "Integrated {} desktop resource(s) for {}.",
+                                            int_plan.actions.len(),
+                                            plan.package.name
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    if !json_mode {
+                                        eprintln!(
+                                            "Warning: desktop integration failed for '{}': {}",
+                                            plan.package.name, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("Error installing '{}': {}", pkg_name, e);
@@ -984,6 +1062,9 @@ async fn run() -> Result<()> {
             }
         }
         Commands::Remove { name, dry_run } => {
+            if !dry_run {
+                let _ = engine.deintegrate(&cli.profile, &name, false);
+            }
             let plan = engine.remove(&name, &cli.profile, dry_run)?;
             if json_mode {
                 emit_json(&serde_json::json!({
@@ -1204,80 +1285,13 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Commands::Sync => {
-            sync_repositories(&engine, json_mode).await?;
-        }
         Commands::Mcp => {
             run_mcp(&engine, &cli.profile).await?;
         }
         Commands::Repo { command } => {
             let config_path = engine.layout().base_dir().join("repositories.toml");
             match command {
-                RepoCommands::Sync => {
-                    sync_repositories(&engine, json_mode).await?;
-                }
-                RepoCommands::List { remote } => {
-                    if remote {
-                        let registry =
-                            pkg_core::repository::CuratedRegistry::fetch_remote_or_fallback().await;
-                        let installed_ids: std::collections::HashSet<String> = if config_path
-                            .exists()
-                        {
-                            pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)
-                                .map(|cfg| cfg.repositories.into_iter().map(|r| r.id).collect())
-                                .unwrap_or_default()
-                        } else {
-                            std::collections::HashSet::new()
-                        };
-
-                        if json_mode {
-                            let repos_json: Vec<_> = registry
-                                .repositories
-                                .iter()
-                                .map(|r| {
-                                    serde_json::json!({
-                                        "id": r.id,
-                                        "name": r.name,
-                                        "distro": r.distro,
-                                        "format": r.format,
-                                        "url": r.url,
-                                        "distribution": r.distribution,
-                                        "components": r.components,
-                                        "priority": r.priority,
-                                        "installed": installed_ids.contains(&r.id),
-                                        "description": r.description,
-                                    })
-                                })
-                                .collect();
-                            emit_json(&serde_json::json!({
-                                "status": "success",
-                                "schema_version": registry.schema_version,
-                                "repositories": repos_json,
-                            }))?;
-                        } else {
-                            println!(
-                                "{:<18} {:<8} {:<6} {:<12} DESCRIPTION",
-                                "ID", "DISTRO", "FORMAT", "STATUS"
-                            );
-                            for r in &registry.repositories {
-                                let status = if installed_ids.contains(&r.id) {
-                                    "installed"
-                                } else {
-                                    "available"
-                                };
-                                let desc = r.description.as_deref().unwrap_or("-");
-                                println!(
-                                    "{:<18} {:<8} {:<6} {:<12} {}",
-                                    r.id, r.distro, r.format, status, desc
-                                );
-                            }
-                            println!(
-                                "\nTip: Run `pkg repo add <id>` to enable an official repository."
-                            );
-                        }
-                        return Ok(());
-                    }
-
+                None | Some(RepoCommands::List) => {
                     if !config_path.exists() {
                         if json_mode {
                             emit_json(
@@ -1285,7 +1299,7 @@ async fn run() -> Result<()> {
                             )?;
                         } else {
                             println!("No repositories configured.");
-                            println!("Run `pkg sync` or `pkg repo list --remote` to get started.");
+                            println!("Run `pkg repo update` or `pkg repo remote` to get started.");
                         }
                         return Ok(());
                     }
@@ -1318,14 +1332,74 @@ async fn run() -> Result<()> {
                         }
                     }
                 }
-                RepoCommands::Add {
+                Some(RepoCommands::Remote) => {
+                    let registry =
+                        pkg_core::repository::CuratedRegistry::fetch_remote_or_fallback().await;
+                    let installed_ids: std::collections::HashSet<String> = if config_path.exists() {
+                        pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)
+                            .map(|cfg| cfg.repositories.into_iter().map(|r| r.id).collect())
+                            .unwrap_or_default()
+                    } else {
+                        std::collections::HashSet::new()
+                    };
+
+                    if json_mode {
+                        let repos_json: Vec<_> = registry
+                            .repositories
+                            .iter()
+                            .map(|r| {
+                                serde_json::json!({
+                                    "id": r.id,
+                                    "name": r.name,
+                                    "distro": r.distro,
+                                    "format": r.format,
+                                    "url": r.url,
+                                    "distribution": r.distribution,
+                                    "components": r.components,
+                                    "priority": r.priority,
+                                    "installed": installed_ids.contains(&r.id),
+                                    "description": r.description,
+                                })
+                            })
+                            .collect();
+                        emit_json(&serde_json::json!({
+                            "status": "success",
+                            "schema_version": registry.schema_version,
+                            "repositories": repos_json,
+                        }))?;
+                    } else {
+                        println!(
+                            "{:<20} {:<8} {:<6} {:<12} DESCRIPTION",
+                            "ID", "DISTRO", "FORMAT", "STATUS"
+                        );
+                        for r in &registry.repositories {
+                            let status = if installed_ids.contains(&r.id) {
+                                "installed"
+                            } else {
+                                "available"
+                            };
+                            let desc = r.description.as_deref().unwrap_or("-");
+                            println!(
+                                "{:<20} {:<8} {:<6} {:<12} {}",
+                                r.id, r.distro, r.format, status, desc
+                            );
+                        }
+                        println!(
+                            "\nTip: Run `pkg repo add <id>` to enable an official repository."
+                        );
+                    }
+                }
+                Some(RepoCommands::Update) => {
+                    sync_repositories(&engine, json_mode).await?;
+                }
+                Some(RepoCommands::Add {
                     id,
-                    format,
                     url,
+                    format,
                     distribution,
                     components,
                     priority,
-                } => {
+                }) => {
                     let mut config = if config_path.exists() {
                         pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?
                     } else {
@@ -1346,7 +1420,7 @@ async fn run() -> Result<()> {
                         Some(url_str) => {
                             let dist = distribution.ok_or_else(|| {
                                 anyhow::anyhow!(
-                                    "Distribution suite is required when adding a custom repository"
+                                    "Distribution suite is required when adding a custom repository (use --distribution <suite>)"
                                 )
                             })?;
                             pkg_core::repository::RepositoryConfig {
@@ -1365,7 +1439,7 @@ async fn run() -> Result<()> {
                                     .await;
                             let curated = registry.find_by_id(&id).ok_or_else(|| {
                                 anyhow::anyhow!(
-                                    "Repository '{}' is not in the curated registry.\nUse: pkg repo add <id> <url> <distribution> [components...]\nOr check available repositories with: pkg repo list --remote",
+                                    "Repository '{}' is not in the curated registry.\nUse: pkg repo add <id> <url> --distribution <dist> [components...]\nOr check available repositories with: pkg repo remote",
                                     id
                                 )
                             })?;
@@ -1402,7 +1476,36 @@ async fn run() -> Result<()> {
                             "Successfully added repository '{}' ({})",
                             repo_to_add.id, repo_to_add.url
                         );
-                        println!("Run `pkg sync` or `pkg repo sync` to synchronize packages.");
+                        println!("Run `pkg repo update` to synchronize packages.");
+                    }
+                }
+                Some(RepoCommands::Remove { id }) => {
+                    let mut config = if config_path.exists() {
+                        pkg_core::repository::RepositoriesConfig::load_from_file(&config_path)?
+                    } else {
+                        return Err(anyhow::anyhow!("No repositories configured"));
+                    };
+
+                    let initial_len = config.repositories.len();
+                    config.repositories.retain(|r| r.id != id);
+
+                    if config.repositories.len() == initial_len {
+                        return Err(anyhow::anyhow!(
+                            "Repository '{}' not found in configuration",
+                            id
+                        ));
+                    }
+
+                    let toml_string = toml::to_string_pretty(&config)?;
+                    std::fs::write(&config_path, toml_string)?;
+                    if json_mode {
+                        emit_json(&serde_json::json!({
+                            "status": "success",
+                            "operation": "repo_remove",
+                            "id": id,
+                        }))?;
+                    } else {
+                        println!("Successfully removed repository '{}'.", id);
                     }
                 }
             }
@@ -1721,8 +1824,8 @@ async fn run() -> Result<()> {
                 }
             }
         },
-        Commands::Update { .. } => {
-            unreachable!("pkg update is normalized to pkg upgrade before dispatch")
+        Commands::Update { .. } | Commands::SelfUpdate { .. } | Commands::SelfUninstall { .. } => {
+            unreachable!("handled prior to engine initialization")
         }
     }
 

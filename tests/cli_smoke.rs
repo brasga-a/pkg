@@ -97,19 +97,36 @@ fn test_repository_sync_and_package_update_cli_behavior() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("sync"))
+        .stdout(predicate::str::contains("upgrade"))
         .stdout(predicate::str::contains("update"))
-        .stdout(predicate::str::contains("Resolve and apply newer versions"));
+        .stdout(predicate::str::contains("repo"))
+        .stdout(predicate::str::contains("self-update"))
+        .stdout(predicate::str::contains("self-uninstall"));
 
     let temp = tempdir().expect("temporary data directory should be created");
-    let mut update_cmd = Command::cargo_bin("pkg").expect("pkg binary should exist");
-    update_cmd
+    let mut update_guidance_cmd = Command::cargo_bin("pkg").expect("pkg binary should exist");
+    update_guidance_cmd
         .args([
             "--data-dir",
             temp.path()
                 .to_str()
                 .expect("temporary path should be UTF-8"),
             "update",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("explicitly separated"))
+        .stdout(predicate::str::contains("pkg upgrade"))
+        .stdout(predicate::str::contains("pkg repo update"));
+
+    let mut upgrade_cmd = Command::cargo_bin("pkg").expect("pkg binary should exist");
+    upgrade_cmd
+        .args([
+            "--data-dir",
+            temp.path()
+                .to_str()
+                .expect("temporary path should be UTF-8"),
+            "upgrade",
             "--dry-run",
         ])
         .assert()
@@ -121,6 +138,16 @@ fn test_repository_sync_and_package_update_cli_behavior() {
         .args(["repo", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("sync"))
-        .stdout(predicate::str::contains("Synchronize repository metadata"));
+        .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("remote"))
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("add"))
+        .stdout(predicate::str::contains("remove"));
+
+    let mut uninstall_dry_run_cmd = Command::cargo_bin("pkg").expect("pkg binary should exist");
+    uninstall_dry_run_cmd
+        .args(["self-uninstall", "--dry-run", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[DRY-RUN MODE]"));
 }
