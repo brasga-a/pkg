@@ -21,6 +21,11 @@ export default {
       return handleInstallScript(repo, branch);
     }
 
+    // 1b. Uninstaller Script Route: /uninstall, /uninstall.sh
+    if (pathname === "/uninstall" || pathname === "/uninstall.sh") {
+      return handleUninstallScript(repo, branch);
+    }
+
     // 2. Root Route: /
     if (pathname === "/" || pathname === "") {
       // If requested from curl / wget, serve installer script directly: curl -fsSL https://pkg.atlantic.sh | sh
@@ -113,6 +118,45 @@ async function handleInstallScript(repo, branch) {
     });
   } catch (err) {
     return new Response(`# Error fetching install.sh: ${err.message}\n`, {
+      status: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
+  }
+}
+
+/**
+ * Fetch and stream the uninstall.sh script with CDN caching
+ */
+async function handleUninstallScript(repo, branch) {
+  const upstreamUrl = `https://raw.githubusercontent.com/${repo}/${branch}/uninstall.sh`;
+  
+  try {
+    const upstreamRes = await fetch(upstreamUrl, {
+      cf: {
+        cacheEverything: true,
+        cacheTtl: 300 // 5 minutes cache on edge
+      }
+    });
+
+    if (!upstreamRes.ok) {
+      return new Response(`# Error: Failed to fetch uninstall script from ${upstreamUrl}\n# HTTP Status: ${upstreamRes.status}\n`, {
+        status: 502,
+        headers: { "Content-Type": "text/plain; charset=utf-8" }
+      });
+    }
+
+    const scriptText = await upstreamRes.text();
+    return new Response(scriptText, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "public, max-age=300, s-maxage=300",
+        "X-Content-Type-Options": "nosniff",
+        "Access-Control-Allow-Origin": "*"
+      }
+    });
+  } catch (err) {
+    return new Response(`# Error fetching uninstall.sh: ${err.message}\n`, {
       status: 500,
       headers: { "Content-Type": "text/plain; charset=utf-8" }
     });
