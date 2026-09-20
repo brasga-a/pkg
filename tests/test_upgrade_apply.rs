@@ -13,8 +13,24 @@ fn cached_upgrade_applies_and_replaces_the_active_generation() {
 }
 
 #[test]
-fn cached_update_alias_applies_and_replaces_the_active_generation() {
-    cached_update_command_applies("update");
+fn test_update_guidance_explains_separation() {
+    let temp = tempdir().unwrap();
+    let output = Command::cargo_bin("pkg")
+        .unwrap()
+        .args([
+            "--data-dir",
+            temp.path().to_str().unwrap(),
+            "--json",
+            "update",
+            "tool",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "notice");
+    assert!(json["message"].as_str().unwrap().contains("pkg upgrade"));
+    assert!(json["hint"].as_str().unwrap().contains("pkg upgrade tool"));
 }
 
 #[test]

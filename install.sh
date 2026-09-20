@@ -120,7 +120,8 @@ ENVIRONMENT VARIABLES:
     PKG_QUIET                 Silent mode (errors only)
 
 UNINSTALL:
-    curl -fsSL https://pkg.atlantic.sh/uninstall | sh
+    pkg self-uninstall
+    # or remote script: curl -fsSL https://pkg.atlantic.sh/uninstall | sh
 EOF
                 exit 0
                 ;;
@@ -439,10 +440,11 @@ EOF
     # 12. Summary and Welcome
     printf "${COLOR_GREEN}${COLOR_BOLD}pkg has been successfully installed!${COLOR_RESET}\n\n"
     printf "Quick start:\n"
-    printf "  ${COLOR_CYAN}pkg sync${COLOR_RESET}                     # Synchronize repository indexes\n"
-    printf "  ${COLOR_CYAN}pkg search <package>${COLOR_RESET}         # Search for packages across distributions\n"
-    printf "  ${COLOR_CYAN}pkg install <package>${COLOR_RESET}        # Rootless installation into isolated store\n"
-    printf "  ${COLOR_CYAN}pkg mcp${COLOR_RESET}                      # Start Model Context Protocol server for AI agents\n\n"
+    printf "  ${COLOR_CYAN}pkg repo update${COLOR_RESET}         # Synchronize repository indexes\n"
+    printf "  ${COLOR_CYAN}pkg search <package>${COLOR_RESET}     # Search for packages across distributions\n"
+    printf "  ${COLOR_CYAN}pkg install <package>${COLOR_RESET}    # Rootless installation into isolated store\n"
+    printf "  ${COLOR_CYAN}pkg upgrade${COLOR_RESET}              # Upgrade installed packages\n"
+    printf "  ${COLOR_CYAN}pkg mcp${COLOR_RESET}                  # Start Model Context Protocol server for AI agents\n\n"
     printf "Documentation & Guides: ${COLOR_BLUE}https://pkg.atlantic.sh${COLOR_RESET}\n\n"
 }
 
